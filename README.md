@@ -38,20 +38,56 @@ pip install -e .
 pip install -e ".[dev]"
 ```
 
+## Architecture
+
+Every component inherits from a common base class, `MechaElement`, which
+provides shared access to material properties and the fundamental
+stress/safety-factor calculations:
+
+```
+MechaElement                # material, calculate_stress(), safety_factor()
+├── Beam                    # SymPy-backed: reactions, shear, moment, deflection
+├── Shaft                   # + torsional_stress()
+├── Gear                    # + pitch_diameter
+├── Wheel
+├── Bearing
+├── Bolt
+└── Weld
+```
+
+Because they all share `MechaElement`, any element can compute an axial
+stress and its safety factor against yielding:
+
+```python
+from mecapy.bolts import Bolt
+
+bolt = Bolt(diameter=10.0, length=50.0, material="steel")
+stress = bolt.calculate_stress(force=5000, area=80)   # N / mm^2 -> 62.5 MPa
+print(bolt.safety_factor(stress * 1e6))               # vs. steel yield strength
+```
+
 ## Quick Start
 
-### Creating and Analyzing a Beam
+### Analyzing a Beam (powered by SymPy)
+
+The `Beam` class wraps SymPy's continuum-mechanics beam, so you can add
+supports and loads and get symbolic reactions, bending moments and
+deflections:
 
 ```python
 from mecapy.beams import Beam
-from mecapy.materials import get_material_properties
 
-# Create a steel beam
-beam = Beam(length=5.0, material="steel")
+# 6 m steel beam; E comes from the material database, I is supplied
+beam = Beam(length=6.0, material="steel", second_moment=8.0e-6)
 
-# Get material properties
-steel = get_material_properties("steel")
-print(f"Elastic Modulus: {steel['elastic_modulus']/1e9:.1f} GPa")
+# Pin + roller supports and a 2 kN central point load
+beam.add_support(0, "pin").add_support(6, "roller")
+beam.add_point_load(-2000, 3)
+
+print(beam.reactions)                       # {R_0: 1000, R_6: 1000}
+location, moment = beam.max_bending_moment() # (3, 3000) N*m
+stress = beam.bending_stress(distance_to_fiber=0.1)
+print(f"{float(stress)/1e6:.1f} MPa, SF = {beam.safety_factor(float(stress)):.1f}")
 ```
 
 ### Designing a Gear
@@ -61,8 +97,16 @@ from mecapy.gears import Gear
 
 # Create a spur gear
 gear = Gear(teeth=20, module=2.5, material="steel")
-pitch_diameter = gear.teeth * gear.module
-print(f"Pitch Diameter: {pitch_diameter} mm")
+print(f"Pitch Diameter: {gear.pitch_diameter} mm")
+```
+
+### Torsion on a Shaft
+
+```python
+from mecapy.shafts import Shaft
+
+shaft = Shaft(diameter=25.0, length=500.0, material="steel")
+print(f"{shaft.torsional_stress(150_000):.1f} MPa")  # torque in N*mm
 ```
 
 ### Unit Conversions

@@ -1,46 +1,57 @@
-"""Beam calculation functions."""
+"""Standalone beam calculation helper functions.
+
+These are convenience functions for quick, closed-form calculations. For a
+full model with supports and loads, use :class:`mecapy.beams.Beam`, which is
+backed by SymPy.
+"""
 
 
 def calculate_deflection(force, length, elasticity_modulus, moment_of_inertia):
     """
-    Calculate beam deflection under point load.
+    Maximum deflection of a cantilever beam with an end point load.
+
+    Uses the closed-form relation ``delta = P * L**3 / (3 * E * I)``.
 
     Args:
-        force (float): Applied force in Newtons
-        length (float): Beam length in meters
-        elasticity_modulus (float): Young's modulus in Pa
-        moment_of_inertia (float): Second moment of inertia in m^4
+        force (float): Applied end force in Newtons.
+        length (float): Beam length in meters.
+        elasticity_modulus (float): Young's modulus in Pa.
+        moment_of_inertia (float): Second moment of area in m^4.
 
     Returns:
-        float: Maximum deflection in meters
+        float: Maximum deflection in meters.
     """
-    pass
+    return force * length ** 3 / (3 * elasticity_modulus * moment_of_inertia)
 
 
 def calculate_bending_stress(moment, moment_of_inertia, distance):
     """
-    Calculate bending stress in beam.
+    Bending stress at a fiber a given distance from the neutral axis.
+
+    Uses ``sigma = M * c / I``.
 
     Args:
-        moment (float): Bending moment in N·m
-        moment_of_inertia (float): Second moment of inertia in m^4
-        distance (float): Distance from neutral axis in meters
+        moment (float): Bending moment in N*m.
+        moment_of_inertia (float): Second moment of area in m^4.
+        distance (float): Distance ``c`` from the neutral axis in meters.
 
     Returns:
-        float: Bending stress in Pa
+        float: Bending stress in Pa.
     """
-    pass
+    return moment * distance / moment_of_inertia
 
 
 def calculate_shear_stress(force, area):
     """
-    Calculate shear stress in beam.
+    Average transverse shear stress on a section.
+
+    Uses ``tau = V / A``.
 
     Args:
-        force (float): Shear force in Newtons
-        area (float): Cross-sectional area in m^2
+        force (float): Shear force in Newtons.
+        area (float): Cross-sectional area in m^2.
 
     Returns:
-        float: Shear stress in Pa
+        float: Shear stress in Pa.
     """
-    pass
+    return force / area

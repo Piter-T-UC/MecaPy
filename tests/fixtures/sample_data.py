@@ -6,12 +6,12 @@ BEAM_CONFIGURATIONS = {
     "cantilever": {
         "length": 3.0,
         "material": "steel",
-        "section": {"width": 0.1, "height": 0.2},
+        "second_moment": 8.0e-6,
     },
     "simply_supported": {
         "length": 5.0,
         "material": "aluminum",
-        "section": {"diameter": 0.05},
+        "second_moment": 3.0e-6,
     },
 }
 

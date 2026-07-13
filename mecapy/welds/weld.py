@@ -1,31 +1,34 @@
 """Weld design and analysis module."""
 
+from ..base import MechaElement
 
-class Weld:
+
+class Weld(MechaElement):
     """
-    Base class for weld design and analysis.
+    Weld design and analysis.
 
-    This class provides methods for analyzing and designing welded
-    connections in mechanical structures.
+    Inherits shared material and stress behaviour from
+    :class:`~mecapy.base.MechaElement`.
 
     Attributes:
-        weld_type (str): Type of weld (e.g., "fillet", "butt")
-        material (str): Weld material
-        size (float): Weld size in mm
+        weld_type (str): Type of weld (e.g., "fillet", "butt").
+        material (str): Weld material.
+        size (float): Weld size (leg length / throat) in mm.
     """
 
-    def __init__(self, weld_type, material="steel", size=None):
+    def __init__(self, weld_type, material="steel", size=None, name=None):
         """
         Initialize a Weld object.
 
         Args:
-            weld_type (str): Type of weld (e.g., "fillet", "butt")
-            material (str): Weld material (default: "steel")
-            size (float): Weld size in mm (optional)
+            weld_type (str): Type of weld (e.g., "fillet", "butt").
+            material (str): Weld material (default: "steel").
+            size (float): Weld size in mm (optional).
+            name (str): Optional identifier for the weld.
         """
+        super().__init__(name=name, material=material)
         self.weld_type = weld_type
-        self.material = material
         self.size = size
 
     def __repr__(self):
-        return f"Weld(type={self.weld_type}, material={self.material}, size={self.size}mm)"
+        return f"Weld(type={self.weld_type}, material={self.material!r}, size={self.size}mm)"

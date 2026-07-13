@@ -12,15 +12,12 @@ def design_spur_gear():
     # Get material properties
     steel = get_material_properties("steel")
 
-    # Calculate pitch diameter
-    pitch_diameter = gear.teeth * gear.module
-
     print("Spur Gear Design")
     print("=" * 40)
     print(f"Number of teeth: {gear.teeth}")
     print(f"Module: {gear.module} mm")
     print(f"Material: {gear.material}")
-    print(f"Pitch Diameter: {pitch_diameter} mm")
+    print(f"Pitch Diameter: {gear.pitch_diameter} mm")
     print()
     print("Material Properties:")
     print(f"  Density: {steel['density']} kg/m^3")

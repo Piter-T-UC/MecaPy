@@ -16,6 +16,7 @@ __version__ = "0.1.0"
 __author__ = "Piter-T-UC"
 __license__ = "MIT"
 
+from .base import MechaElement
 from . import beams
 from . import wheels
 from . import gears
@@ -26,6 +27,7 @@ from . import shafts
 from . import utils
 
 __all__ = [
+    "MechaElement",
     "beams",
     "wheels",
     "gears",
