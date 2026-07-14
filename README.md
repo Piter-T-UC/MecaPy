@@ -9,13 +9,17 @@ A comprehensive Python library for mechanical engineering calculations and desig
 
 MecaPy provides tools for analyzing and designing various mechanical components:
 
-- **Beams** - Analysis of beams under various loading conditions
-- **Wheels** - Design and analysis of wheels
-- **Gears** - Gear design and transmission analysis
-- **Bearings** - Bearing selection and life prediction
+- **Materials** - `Material` class with mechanical, thermal and physical properties, plus a built-in database
+- **Beams** - SymPy-backed analysis (reactions, shear, moment, deflection)
+- **Gears** - AGMA bending and contact (pitting) stress analysis
+- **Belts** - Flat and V-belt drive geometry, tensions and power
+- **Chains** - Roller chain geometry, kinematics and chordal variation
+- **Shafts** - Shaft design with torsional stress
+- **Bearings** - Bearing selection and analysis
 - **Bolts** - Bolt stress and fastener analysis
-- **Welds** - Weld design and fatigue analysis
-- **Shafts** - Shaft design and deflection analysis
+- **Welds** - Weld design and analysis
+- **Wheels** - Wheel design and analysis
+- **Reports** - Export all defined elements to a LaTeX `.tex` file
 
 ## Installation
 
@@ -47,12 +51,17 @@ stress/safety-factor calculations:
 ```
 MechaElement                # material, calculate_stress(), safety_factor()
 ├── Beam                    # SymPy-backed: reactions, shear, moment, deflection
+├── Gear                    # AGMA bending_stress() & contact_stress()
+├── Belt                    # tension_ratio(), max_power()
+├── Chain                   # pitch_diameter(), velocity(), chordal variation
 ├── Shaft                   # + torsional_stress()
-├── Gear                    # + pitch_diameter
 ├── Wheel
 ├── Bearing
 ├── Bolt
 └── Weld
+
+Every element resolves its material through the `Material` class, which
+carries density, moduli, strengths, hardness and thermal properties.
 ```
 
 Because they all share `MechaElement`, any element can compute an axial
@@ -90,15 +99,82 @@ stress = beam.bending_stress(distance_to_fiber=0.1)
 print(f"{float(stress)/1e6:.1f} MPa, SF = {beam.safety_factor(float(stress)):.1f}")
 ```
 
-### Designing a Gear
+### AGMA Gear Analysis
 
 ```python
 from mecapy.gears import Gear
 
-# Create a spur gear
-gear = Gear(teeth=20, module=2.5, material="steel")
-print(f"Pitch Diameter: {gear.pitch_diameter} mm")
+pinion = Gear(teeth=17, module=2.5, face_width=38, quality_number=6, material="steel")
+power, speed = 5000, 1200          # 5 kW at 1200 rev/min
+
+bending = pinion.bending_stress(power, speed, geometry_factor=0.34)
+contact = pinion.contact_stress(power, speed, gear_ratio=3.0)
+print(f"bending {bending:.1f} MPa, contact {contact:.1f} MPa")
+print(f"bending SF = {pinion.bending_safety_factor(bending):.2f}")
 ```
+
+### Belt Drive
+
+```python
+from mecapy.belts import Belt
+
+belt = Belt(belt_type="v", friction=0.3, mass_per_length=0.4, groove_angle=38)
+theta = belt.wrap_angle(0.30, 0.15, 0.80)          # large d, small d, center (m)
+print(f"max power = {belt.max_power(600, 20, theta)/1000:.2f} kW")
+```
+
+### Chain Drive
+
+```python
+from mecapy.chains import Chain
+
+chain = Chain(pitch=12.7, teeth=17)                # ANSI 40, mm
+print(f"sprocket PD = {chain.pitch_diameter():.1f} mm")
+print(f"chain speed @1200 rpm = {chain.velocity(1200)/1000:.2f} m/s")
+```
+
+### Materials
+
+```python
+from mecapy import get_material
+
+steel = get_material("steel")
+print(steel.elastic_modulus, steel.ultimate_strength, steel.hardness_brinell)
+print(steel.thermal_conductivity, steel.thermal_expansion)
+print(steel["yield_strength"])   # also supports dict-style access
+```
+
+### Exporting a LaTeX Report
+
+Collect the elements you define into a `Report` and export a compilable
+`.tex` file to drop straight into your report:
+
+```python
+from mecapy import Report
+from mecapy.gears import Gear
+from mecapy.shafts import Shaft
+
+pinion = Gear(teeth=17, module=2.5, face_width=38, name="pinion")
+shaft = Shaft(diameter=25.0, length=500.0, name="input shaft")
+
+report = Report(title="Gearbox Design Report", author="P. Taboada")
+report.add_section("Transmission components")
+report.add(pinion, description="Driving pinion, 5 kW at 1200 rev/min.")
+report.add(shaft)
+
+# Include a computed-results table too
+sb = pinion.bending_stress(5000, 1200, geometry_factor=0.34)
+report.add_result("AGMA check", [
+    ("Bending stress", sb, "MPa"),
+    ("Bending safety factor", pinion.bending_safety_factor(sb), ""),
+])
+
+report.save("report.tex")   # -> compile with pdflatex / include in your doc
+```
+
+Every element also exports on its own via `element.to_latex()`. Values are
+formatted for LaTeX automatically (scientific notation, escaped names,
+booktabs tables).
 
 ### Torsion on a Shaft
 

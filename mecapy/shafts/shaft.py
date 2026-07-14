@@ -19,6 +19,12 @@ class Shaft(MechaElement):
         material (str): Material type.
     """
 
+    LATEX_FIELDS = [
+        ("diameter", "Diameter", "mm"),
+        ("length", "Length", "mm"),
+        ("polar_moment", "Polar moment $J$", "mm$^4$"),
+    ]
+
     def __init__(self, diameter, length, material="steel", name=None):
         """
         Initialize a Shaft object.

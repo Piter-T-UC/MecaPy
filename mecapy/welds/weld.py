@@ -16,6 +16,11 @@ class Weld(MechaElement):
         size (float): Weld size (leg length / throat) in mm.
     """
 
+    LATEX_FIELDS = [
+        ("weld_type", "Type", ""),
+        ("size", "Size", "mm"),
+    ]
+
     def __init__(self, weld_type, material="steel", size=None, name=None):
         """
         Initialize a Weld object.
