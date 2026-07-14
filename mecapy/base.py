@@ -1,6 +1,6 @@
 """Base class for all mechanical elements in MecaPy."""
 
-from .materials import get_material_properties
+from .materials import Material, get_material
 
 
 class MechaElement:
@@ -13,7 +13,8 @@ class MechaElement:
 
     Attributes:
         name (str): Optional identifier for the element.
-        material (str): Material name, looked up in the material database.
+        material: Material name (looked up in the database) or a
+            :class:`~mecapy.materials.Material` instance.
     """
 
     def __init__(self, name=None, material="steel"):
@@ -22,16 +23,23 @@ class MechaElement:
 
         Args:
             name (str): Optional identifier for the element.
-            material (str): Material name (default: "steel"). Must exist in
-                the material database (see :mod:`mecapy.materials`).
+            material: Material name (default: "steel") that must exist in
+                the material database, or a
+                :class:`~mecapy.materials.Material` instance.
         """
         self.name = name
         self.material = material
 
     @property
     def material_properties(self):
-        """dict: Properties of this element's material from the database."""
-        return get_material_properties(self.material)
+        """Material: This element's material, resolved from the database.
+
+        The returned :class:`~mecapy.materials.Material` also supports
+        dictionary-style access (``material_properties["yield_strength"]``).
+        """
+        if isinstance(self.material, Material):
+            return self.material
+        return get_material(self.material)
 
     def calculate_stress(self, force, area):
         """
