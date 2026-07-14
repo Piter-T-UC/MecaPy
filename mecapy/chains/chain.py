@@ -25,6 +25,13 @@ class Chain(MechaElement):
         material (str): Chain material.
     """
 
+    LATEX_FIELDS = [
+        ("pitch", "Pitch", "mm"),
+        ("teeth", "Driving teeth", ""),
+        ("strands", "Strands", ""),
+        ("pitch_diameter", "Sprocket pitch diameter", "mm"),
+    ]
+
     def __init__(self, pitch, teeth, strands=1, material="steel", name=None):
         """
         Initialize a Chain object.

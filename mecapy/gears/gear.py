@@ -26,6 +26,15 @@ class Gear(MechaElement):
         material (str): Material type.
     """
 
+    LATEX_FIELDS = [
+        ("teeth", "Number of teeth", ""),
+        ("module", "Module", "mm"),
+        ("pitch_diameter", "Pitch diameter", "mm"),
+        ("face_width", "Face width", "mm"),
+        ("pressure_angle", "Pressure angle", "deg"),
+        ("quality_number", "AGMA quality $Q_v$", ""),
+    ]
+
     def __init__(self, teeth, module, face_width=None, pressure_angle=20.0,
                  quality_number=6, material="steel", name=None):
         """

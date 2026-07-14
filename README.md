@@ -19,6 +19,7 @@ MecaPy provides tools for analyzing and designing various mechanical components:
 - **Bolts** - Bolt stress and fastener analysis
 - **Welds** - Weld design and analysis
 - **Wheels** - Wheel design and analysis
+- **Reports** - Export all defined elements to a LaTeX `.tex` file
 
 ## Installation
 
@@ -142,6 +143,38 @@ print(steel.elastic_modulus, steel.ultimate_strength, steel.hardness_brinell)
 print(steel.thermal_conductivity, steel.thermal_expansion)
 print(steel["yield_strength"])   # also supports dict-style access
 ```
+
+### Exporting a LaTeX Report
+
+Collect the elements you define into a `Report` and export a compilable
+`.tex` file to drop straight into your report:
+
+```python
+from mecapy import Report
+from mecapy.gears import Gear
+from mecapy.shafts import Shaft
+
+pinion = Gear(teeth=17, module=2.5, face_width=38, name="pinion")
+shaft = Shaft(diameter=25.0, length=500.0, name="input shaft")
+
+report = Report(title="Gearbox Design Report", author="P. Taboada")
+report.add_section("Transmission components")
+report.add(pinion, description="Driving pinion, 5 kW at 1200 rev/min.")
+report.add(shaft)
+
+# Include a computed-results table too
+sb = pinion.bending_stress(5000, 1200, geometry_factor=0.34)
+report.add_result("AGMA check", [
+    ("Bending stress", sb, "MPa"),
+    ("Bending safety factor", pinion.bending_safety_factor(sb), ""),
+])
+
+report.save("report.tex")   # -> compile with pdflatex / include in your doc
+```
+
+Every element also exports on its own via `element.to_latex()`. Values are
+formatted for LaTeX automatically (scientific notation, escaped names,
+booktabs tables).
 
 ### Torsion on a Shaft
 

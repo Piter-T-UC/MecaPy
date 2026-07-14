@@ -6,6 +6,7 @@ API Reference
 
    base
    materials
+   report
    beams
    gears
    belts

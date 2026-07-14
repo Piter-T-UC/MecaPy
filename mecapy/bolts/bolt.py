@@ -19,6 +19,12 @@ class Bolt(MechaElement):
         material (str): Material type.
     """
 
+    LATEX_FIELDS = [
+        ("diameter", "Diameter", "mm"),
+        ("length", "Length", "mm"),
+        ("grade", "Grade", ""),
+    ]
+
     def __init__(self, diameter, length, grade="M10", material="steel", name=None):
         """
         Initialize a Bolt object.

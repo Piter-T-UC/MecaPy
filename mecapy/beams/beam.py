@@ -26,6 +26,12 @@ class Beam(MechaElement):
             ``I`` so results can be kept symbolic.
     """
 
+    LATEX_FIELDS = [
+        ("length", "Length", "m"),
+        ("elastic_modulus", "Elastic modulus $E$", "Pa"),
+        ("second_moment", "Second moment $I$", "m$^4$"),
+    ]
+
     def __init__(self, length, material="steel", elastic_modulus=None,
                  second_moment=None, name=None):
         """

@@ -19,6 +19,7 @@ __author__ = "Piter-T-UC"
 __license__ = "MIT"
 
 from .base import MechaElement
+from .report import Report
 from .materials import Material, get_material, get_material_properties, get_available_materials
 from . import beams
 from . import wheels
@@ -33,6 +34,7 @@ from . import utils
 
 __all__ = [
     "MechaElement",
+    "Report",
     "Material",
     "get_material",
     "get_material_properties",

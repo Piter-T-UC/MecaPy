@@ -17,6 +17,13 @@ class Bearing(MechaElement):
         bearing_type (str): Type of bearing.
     """
 
+    LATEX_FIELDS = [
+        ("bore_diameter", "Bore diameter", "mm"),
+        ("outer_diameter", "Outer diameter", "mm"),
+        ("width", "Width", "mm"),
+        ("bearing_type", "Type", ""),
+    ]
+
     def __init__(self, bore_diameter, outer_diameter, width,
                  bearing_type="ball", material="steel", name=None):
         """

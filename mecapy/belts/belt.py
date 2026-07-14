@@ -25,6 +25,13 @@ class Belt(MechaElement):
         material (str): Belt material.
     """
 
+    LATEX_FIELDS = [
+        ("belt_type", "Belt type", ""),
+        ("friction", "Friction coefficient $\\mu$", ""),
+        ("mass_per_length", "Mass per length", "kg/m"),
+        ("groove_angle", "Groove angle", "deg"),
+    ]
+
     def __init__(self, belt_type="flat", friction=0.3, mass_per_length=0.0,
                  groove_angle=38.0, material="steel", name=None):
         """
