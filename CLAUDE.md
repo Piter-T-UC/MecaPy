@@ -2,6 +2,26 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Quick Start: Understanding the Codebase
+
+The fastest way to understand how things connect is via **graphify** — a knowledge graph built from the codebase:
+
+```bash
+# Query existing graph (no rebuild, instant answers)
+/graphify query "how does AGMA rating calculate stress?"
+/graphify query "what's the difference between spur and helical gears?"
+/graphify path "Transmission" "SpurGear"     # shortest path between concepts
+/graphify explain "PlanetaryGearSet"         # plain-language summary
+
+# Update graph after major code changes
+/graphify . --update
+
+# Full rebuild if structure changed dramatically
+/graphify .
+```
+
+Open `graphify-out/graph.html` in your browser for an interactive visualization.
+
 ## Commands
 
 ```bash
@@ -43,24 +63,116 @@ Every mechanical component inherits from a single base class, `MechaElement`
 stress/safety-factor calculations:
 
 ```
-MechaElement                # material_properties, calculate_stress(F, A), safety_factor(stress)
-├── Beam (beams/)           # SymPy-backed: reactions, shear, moment, deflection
-├── Shaft (shafts/)         # + torsional_stress()
-├── Gear (gears/)           # base gear geometry; see gear type hierarchy below
-├── Wheel (wheels/)
-├── Bearing (bearings/)
-├── Bolt (bolts/)
-└── Weld (welds/)
+MechaElement                              # material_properties, calculate_stress(F, A), safety_factor(stress)
+├── Beam (beams/)                         # SymPy-backed: reactions, shear, moment, deflection
+├── Shaft (shafts/)                       # + torsional_stress()
+│   └── PowerScrew (shafts/power_screw.py)  # lead screw: thread stresses, buckling, efficiency
+├── Gear (gears/)                         # base gear geometry; see gear type hierarchy below
+├── Wheel (wheels/)                       # pulleys, sprockets, general rotating members
+├── Bearing (bearings/)                   # rolling contact stress & life
+├── Bolt (bolts/)                         # ISO metric: tension, preload, stiffness
+│   └── BoltedUnion (bolts/)              # joint: load distribution, separation, efficiency
+└── Weld (welds/)                         # weld bead stresses & material
 ```
 
 Because every element shares `MechaElement`, any of them can compute an axial stress
 and a safety factor against yielding via the same two inherited methods — there is no
 per-element stress/safety duplication.
 
+### How Stress & Safety Work Everywhere
+
+Every element inherits two methods from `MechaElement`:
+- **`calculate_stress(force, area)`** — returns MPa for a given force/area pair
+- **`safety_factor(stress)`** — returns ratio of yield strength to actual stress
+
+This means you can check if a Bolt is safe the same way you check a Gear tooth:
+
+```python
+bolt = Bolt("M10", 50, material="steel")
+stress = bolt.calculate_stress(8000, bolt.stress_area)  # 8 kN on M10 bolt
+sf = bolt.safety_factor(stress)
+assert sf > 1.5  # meets safety requirement
+```
+
 Materials are looked up by name (`"steel"`, `"aluminum"`, `"copper"`, `"cast_iron"`,
 `"bronze"`) from a database in `mecapy/utils/constants.py` (`MATERIALS` dict), accessed
 through `mecapy/materials.py` (`get_material_properties`, `get_available_materials`,
 `add_custom_material`). All material properties are strict SI (Pa, kg/m^3).
+
+## Subsystem Overview: What Does Each Module Do?
+
+### Shafts (`mecapy/shafts/`)
+**Purpose:** rotational members carrying bending and torsional loads.
+
+- **`Shaft`** — circular shaft with bending/torsional stress, deflection, critical speed
+  - Computes combined bending + torsion using von Mises equivalent stress
+  - Used in gearbox design to size intermediate shafts
+- **`PowerScrew`** — lead screw (translating screw for power transmission)
+  - Models thread contact stresses, buckling under axial load
+  - Calculates raising/lowering torque with optional collar friction
+  - Thread forms: square, Acme, trapezoidal, buttress, or custom
+  - Efficiency & self-locking analysis
+
+### Gears (`mecapy/gears/`) — Largest subsystem
+**Purpose:** power transmission through tooth mesh.
+
+- **`Gear`** — base class, standard full-depth involute geometry
+  - Common to all types: pitch/base/outside/root diameters, addendum/dedendum
+  - Accepts `module` (mm, SI) OR `diametral_pitch` (teeth/inch) — exactly one required
+  - All downstream code works in metric internally
+- **`CylindricalGear`** family:
+  - **`SpurGear`** — parallel axes, no helix angle
+  - **`HelicalGear`** — parallel axes with helix angle (requires hand: "right"/"left")
+  - **`HerringboneGear`** — back-to-back helical, thrust cancels automatically
+- **`BevelGear`** — intersecting axes (cone geometry)
+  - Pair-wise methods (`cone_angle_with()`, `contact_ratio_with()`) require the mating gear
+- **`Worm` + `WormWheel`** — non-parallel, non-intersecting axes
+  - Worm has `starts` and `lead` instead of teeth/module
+  - WormWheel is a modified gear that meshes only with Worm
+- **`Rack`** — infinite pitch radius (linear motion)
+  - Terminal member of a transmission (cannot drive, only be driven)
+- **`PlanetaryGearSet`** — composite of sun/planet/ring
+  - Solves via Willis train-value equation
+  - Not a `Transmission` stage (three members, not two)
+- **`Transmission`** — chains 2+ meshes together
+  - Single source of truth for mesh compatibility (`_check_mesh()`)
+  - Kinematic model: speed ratios, output torque/power
+  - Reused by AGMA rating and other pair methods
+- **AGMA Rating** (`agma.py` + `agma_data.py`) — fatigue & contact stress
+  - Implements AGMA 2101-D04 (metric) for cylindrical gears
+  - Bending stress (Lewis + geometry factor) and pitting (Hertzian contact)
+  - Digitized tables: Lewis Y, J geometry factors, material allowables, reliability factors
+  - Accepts explicit overrides to bypass table lookup
+
+### Bolts (`mecapy/bolts/`)
+**Purpose:** threaded fasteners & bolted joints.
+
+- **`Bolt`** — ISO metric bolt
+  - Thread geometry from ISO 898-1 coarse table (diameter, pitch, stress area)
+  - Strength data from ISO 898-1 property classes (8.8, 10.9, etc.)
+  - Stiffness, preload capacity, tensile stress calculation
+- **`BoltedUnion`** — multi-bolt joint
+  - Models load distribution across bolt group
+  - Eccentric load handling (moment splitting)
+  - Joint separation & slip safety factors
+
+### Beams (`mecapy/beams/`)
+**Purpose:** static & dynamic analysis of bending members.
+
+- **`Beam`** — SymPy-backed symbolic solver
+  - Builder pattern: `add_support()`, `add_load()`, `add_moment()`, etc. return `self`
+  - Lazy solve: reactions computed only when needed
+  - Results: shear force, bending moment, deflection, stress
+- **Standalone helpers** (`calculations.py`):
+  - Cantilever deflection, bending stress (M*c/I), shear stress (V/A)
+  - Useful when you don't need a full solver
+
+### Wheels (`mecapy/wheels/`)
+**Purpose:** general rotating members (pulleys, sprockets, flywheels).
+
+- **`Wheel`** — base rotating member with inertia & stress
+  - Rim stresses under centrifugal loading
+  - Moment of inertia calculation
 
 ### Units convention
 
@@ -83,59 +195,266 @@ is requested. `mecapy/beams/calculations.py` holds separate standalone closed-fo
 helpers (cantilever deflection, M*c/I bending stress, V/A shear stress) that don't
 require building a full `Beam`.
 
-### Gear subsystem (`mecapy/gears/`)
+### Gear Subsystem Deep Dive (`mecapy/gears/`)
 
-This is the largest and most structured subsystem. `Gear` (`gear.py`) is the common base
-(backward-compatible, directly constructible) with full standard full-depth geometry
-(pitch/base/outside/root diameter, circular pitch, addendum/dedendum). Every gear
-constructor accepts either `module` (mm, primary/SI) or `diametral_pitch` (teeth/inch,
-US customary) — exactly one must be given; `diametral_pitch` is converted to `module`
-internally so all downstream geometry and rating code is metric-only.
+This is the largest and most structured subsystem. The design prioritizes extensibility:
+gear types, mesh compatibility, and rating methods should be independent but coordinated.
+
+#### Core Design Principles
+
+**1. Unit conversion at the boundary:**
+- Constructor accepts EITHER `module` (mm, SI) OR `diametral_pitch` (teeth/inch)
+- Exactly one must be given; the other is rejected with a clear error
+- `diametral_pitch` is converted to `module` internally (e.g., 12 DP → 2.117 mm)
+- All internal geometry, mesh checks, and rating use metric-only
+
+**2. Pair-wise geometry is a method, not a property:**
+- Properties like `pitch_diameter`, `outside_diameter` belong to a single gear
+- Anything that depends on a mating gear is a `*_with(other)` method:
+  ```python
+  spur1 = SpurGear(teeth=20, module=2)
+  spur2 = SpurGear(teeth=60, module=2)
+  center_dist = spur1.center_distance_with(spur2)  # method, not property
+  contact_ratio = spur1.contact_ratio_with(spur2)
+  ```
+- This forces you to think about mesh compatibility upfront
+
+**3. Single source of truth for mesh rules (`Transmission._check_mesh()`):**
+- `Transmission._check_mesh(driver, driven)` validates:
+  - Module and pressure angle match (or compatible)
+  - Gear types are compatible (e.g., no spur + bevel unless bridged)
+  - Helical hands are opposite for external gears
+  - Rack/Worm terminal rules are obeyed
+- Other pair methods (`contact_ratio_with()`, `PlanetaryGearSet.__init__()`) reuse this
+- Reduces the risk of silently accepting bad meshes
+
+#### Type Hierarchy
 
 ```
-Gear (gear.py)
-├── CylindricalGear (cylindrical.py)   # normal module/pressure angle, transverse geometry
-│   ├── SpurGear
-│   ├── HelicalGear                    # requires helix_angle + hand ("right"/"left")
-│   └── HerringboneGear(HelicalGear)   # hand forced None; thrust cancels
-├── BevelGear (bevel.py)               # pair-wise cone geometry (*_with(mate) methods)
-└── WormWheel (worm.py)                # meshes only with Worm, not Gear-derived on its own axis
+Gear (gear.py) — base, standard involute geometry
+├── CylindricalGear (cylindrical.py) — parallel axes
+│   ├── SpurGear — no helix
+│   ├── HelicalGear — helix_angle + hand ("right"/"left")
+│   └── HerringboneGear(HelicalGear) — hand = None (thrust cancels)
+├── BevelGear (bevel.py) — intersecting axes (cone mesh)
+│   └── Methods like `cone_angle_with(mate)` for pair-wise geometry
+└── WormWheel (worm.py) — special: meshes only with Worm
 
-Worm (worm.py)                          # NOT a Gear subclass — has starts/lead, not teeth/module in the same sense
-Rack (rack.py)                          # NOT a Gear subclass — infinite pitch radius, no teeth count
-PlanetaryGearSet (planetary.py)         # composite of sun/planet/ring Gear objects or plain ints
-Transmission (transmission.py)          # chains 2+ meshes; owns the mesh-compatibility rules
+Worm (worm.py) — NOT a Gear subclass
+  • Has `starts` and `lead`, not teeth/module
+  • Linear velocity is different from rotational velocity
+  • Pair-wise methods like `velocity_ratio_with(wheel)` on either side
+
+Rack (rack.py) — NOT a Gear subclass
+  • Infinite pitch radius (linearized gear)
+  • Terminal in a transmission (can only be driven, not drive)
+  • Methods: `center_distance_with(gear)`, `contact_ratio_with(gear)`
+
+PlanetaryGearSet (planetary.py) — composite
+  • Sun + planet(s) + ring, all three rotating on the same axis
+  • Willis train-value equation solves speed/torque relationships
+  • NOT a `Transmission` stage (stage = two-element mesh, this = three-member)
+  • Build manually: `PlanetaryGearSet(sun=20, planet=30, ring=80)`
+
+Transmission (transmission.py) — orchestrates meshes
+  • Chains 2+ elements (gears, rack, worm) into a kinematic system
+  • Computes overall ratio, output speed/torque, pitch-line velocity
+  • Calls `_check_mesh()` to validate each stage
+  • Does NOT include planetary sets (compose manually)
 ```
 
-Key structural points for extending this subsystem:
+#### Rating Strategies
 
-- **Pair-wise geometry is a method, not a property.** Anything that depends on a mating
-  gear (contact ratio, center distance, bevel cone angle, worm ratio) is a
-  `*_with(other)` method on one of the two gears, not a standalone property — because
-  the value has no meaning without the mate.
-- **`Transmission._check_mesh(driver, driven)`** (in `transmission.py`) is the single
-  source of truth for whether two elements can mesh (matching module and pressure angle,
-  compatible types, opposite hands for external helical gears, rack/worm must be
-  terminal). Other pair methods (`contact_ratio_with`, `PlanetaryGearSet` construction)
-  import and reuse this function rather than re-implementing compatibility checks.
-- **AGMA rating (`agma.py` + `agma_data.py`)** implements the AGMA 2101-D04 metric
-  bending/pitting equations (Shigley's *Mechanical Engineering Design* ch. 14 is the
-  numeric reference) for the cylindrical family only (spur/helical/herringbone,
-  including a pinion-on-rack). Bevel and worm gears intentionally get simplified
-  Lewis-equation / Buckingham-style checks instead (`BevelGear.lewis_bending_stress`,
-  `Worm.permissible_load`) — they are documented as educational approximations, not
-  full AGMA 2003/6034 ratings. `agma_data.py` holds digitized/curve-fit tables (Lewis Y,
-  J geometry-factor grids, Cma coefficients, reliability factors, gear-steel allowables)
-  that `agma.py`'s factor functions and the `AGMARating` class consume; any rating
-  accepts explicit overrides (e.g. `YJ=`) to bypass a table lookup.
-- **`PlanetaryGearSet` is deliberately not a `Transmission` stage** — a stage is a
-  two-element mesh, while a planetary set is a three-member (sun/planet/ring) composite
-  solved via the Willis train-value equation. Compose their ratios manually when both
-  appear in the same gearbox.
+**AGMA 2101-D04** (Cylindrical gears only: Spur, Helical, Herringbone, pinion-on-rack)
+- Files: `agma.py`, `agma_data.py`, `agma_factors.py`
+- Two equations:
+  - **Bending:** Lewis stress with geometry factor J, K factors (load, life, reliability)
+  - **Pitting:** Hertzian contact stress with surface finish, hardness factors
+- Data tables digitized from AGMA 2101-D04:
+  - Lewis geometry factor Y for various tooth counts and pressure angles
+  - J factor for different gear ratios
+  - Material allowables for various hardnesses
+  - Cma load distribution factors
+  - Reliability factors (1.0 = 99% survival, down to 0.5 for 99.99%)
+- Accepts explicit overrides: `AGMARating(..., YJ=0.48, Cma=1.2)` to bypass table lookup
 
-### Validation pattern
+**Simplified methods** (Bevel & Worm — educational approximations):
+- `BevelGear.lewis_bending_stress()` — Lewis equation with cone-angle correction
+- `Worm.permissible_load()` — Buckingham approximation for wear & bending
+- Documented as **not full AGMA 2003/6034** (the real standards)
+- Suitable for design exploration; full rating requires domain expertise
+
+#### Common Pitfalls & How to Avoid Them
+
+| Problem | Cause | Solution |
+|---------|-------|----------|
+| "Module mismatch" error | Used `module=2` in one gear, `diametral_pitch=12` in another | Always use the same unit — either metric or US customary across a mesh |
+| "Rack must be terminal" | Tried to drive a Rack as if it were a gear | Rack can only be the last (output) stage |
+| "Worm/WormWheel only mesh together" | Mixed a Worm with a SpurGear | Check gear types match in `Transmission` |
+| Pair method returns 0 | Two gears have incompatible pressure angles | Ensure both use same pressure angle (default 20°) |
+| Unexpected AGMA rating | Material allowables look wrong | Check `agma_data.py` tables; override with explicit `allowable_stress_bending=...` if needed |
+
+### Validation Pattern
 
 Constructors validate eagerly and raise `ValueError` with a specific message for every
 non-physical input (zero/negative dimensions, out-of-range angles, incompatible
 mesh pairs, failed planetary assembly/geometric conditions). There is no silent clamping
 or default-substitution for bad input anywhere in the codebase.
+
+Example (from `PowerScrew.__init__`):
+```python
+if major_diameter <= 0:
+    raise ValueError("Major diameter must be strictly positive")
+if pitch >= major_diameter:
+    raise ValueError("Pitch too large: root diameter would be non-positive")
+```
+
+This pattern applies everywhere — fail fast and loud, with a message that tells the user WHY.
+
+## How to Extend the Codebase
+
+### Adding a New Mechanical Element
+
+**Pattern:** inherit from `MechaElement`, implement geometry + stress calculation.
+
+1. **Create a new file** in the appropriate subsystem (e.g., `mecapy/bearings/spherical.py`)
+2. **Inherit from `MechaElement`:**
+   ```python
+   from ..base import MechaElement
+   
+   class SphericalBearing(MechaElement):
+       def __init__(self, bore_diameter, material="steel", name=None):
+           super().__init__(name=name, material=material)
+           if bore_diameter <= 0:
+               raise ValueError("Bore diameter must be strictly positive")
+           self.bore_diameter = bore_diameter
+   ```
+3. **Add geometry properties** using `@property`:
+   ```python
+   @property
+   def raceway_stress_area(self):
+       """Contact area in mm^2."""
+       return math.pi * self.bore_diameter * self.height
+   ```
+4. **Implement stress calculation** (optional override):
+   ```python
+   def contact_stress(self, load_force):
+       """Hertzian contact stress for radial load."""
+       area = self.raceway_stress_area
+       return self.calculate_stress(load_force, area)
+   ```
+   Or use the inherited `calculate_stress(force, area)` directly.
+5. **Add tests** in `tests/test_<subsystem>.py`
+6. **Update imports** in `mecapy/__init__.py` and the subsystem's `__init__.py`
+
+### Adding a New Gear Type
+
+**Pattern:** inherit from `CylindricalGear` or `Gear`, implement pair-wise methods.
+
+1. **Inherit from the right base:**
+   - If parallel axes with involute teeth → inherit `CylindricalGear`
+   - If custom geometry → inherit `Gear` directly
+2. **Add constructor validation:**
+   ```python
+   class StraightBevelGear(BevelGear):
+       def __init__(self, teeth, module, cone_angle, ...):
+           if not 0 < cone_angle < 90:
+               raise ValueError("Cone angle must be in (0, 90) degrees")
+   ```
+3. **Implement pair-wise geometry:**
+   ```python
+   def contact_ratio_with(self, other):
+       """Override or inherit from base."""
+       # Validate compatibility
+       Transmission._check_mesh(self, other)
+       # Compute pair-wise value
+       return ...
+   ```
+4. **Hook into mesh validation** — update `Transmission._check_mesh()` if new rules apply
+5. **Add rating method** if you're adding a new gear family:
+   - Cylindrical family → use AGMA 2101-D04 (already in `agma.py`)
+   - Bevel/Worm → add a simplified method in the gear class itself
+
+### Adding a Stress Rating Method
+
+**Pattern:** class method or standalone function in a dedicated module.
+
+Example: `BevelGear.lewis_bending_stress()`
+
+```python
+def lewis_bending_stress(self, power_kw, speed_rpm, overload_factor=1.0):
+    """Lewis equation for bending stress (educational approximation)."""
+    # Convert power to force
+    force = self.force_from_power(power_kw, speed_rpm)
+    # Apply Lewis geometry factor (from data table or formula)
+    lewisfactor = self._lewis_y_factor()
+    stress = (force * self.face_width) / (self.module * lewisfactor)
+    return stress * overload_factor
+```
+
+For AGMA-style ratings with multiple factors, create a data module (`agma_data.py`) with:
+- Digitized tables (curve-fit or hardcoded grids)
+- Factor lookup functions
+- Reference documentation
+
+### Common Code Patterns to Follow
+
+| Goal | Pattern |
+|------|---------|
+| Make a value computed but look like an attribute | Use `@property` |
+| Compute something that depends on a mating element | Use `method_name_with(other)` |
+| Validate a single bad input | Raise `ValueError("message")` in `__init__` |
+| Share data across many elements | Put it in `mecapy/utils/constants.py` or a subsystem `_data.py` |
+| Solve a system of equations symbolically | Use `SymPy` (see `Beam` for the pattern) |
+| Convert between unit systems | Use functions in `mecapy/utils/converters.py` |
+| Document an approximation or limitation | Add a docstring note or `# Docstring reference:` comment |
+
+## Testing Strategy
+
+**Unit tests** (`tests/test_*.py`):
+- Test constructors with valid/invalid inputs
+- Test individual property calculations against known examples
+- Mock external data (threads, materials) if needed
+
+**Integration tests:**
+- Build a gearbox (`Transmission`) and verify kinematic output matches expected ratio
+- Calculate full AGMA rating and compare against published examples (e.g., Shigley textbook)
+- Test that a bolted joint under eccentric load distributes correctly
+
+**Fixtures** (`conftest.py`):
+- Define standard test gears, shafts, bolts so tests reuse them
+
+**Run with coverage:**
+```bash
+pytest --cov=mecapy --cov-report=html
+# Open htmlcov/index.html to see which lines are tested
+```
+
+## Common Questions
+
+**Q: Where do I find the stress area of an M10 bolt?**  
+A: `Bolt("M10").stress_area` — it's looked up from `mecapy/bolts/thread_data.py`.
+
+**Q: How do I set up a gearbox and check the rating?**  
+A: Use `Transmission` to chain gears, then `AGMARating` on each stage:
+```python
+from mecapy.gears import SpurGear, Transmission
+from mecapy.gears.agma import AGMARating
+
+pinion = SpurGear(teeth=20, module=2)
+gear = SpurGear(teeth=60, module=2)
+trans = Transmission(pinion, gear)
+
+rating = AGMARating(pinion, gear, power_kw=10, speed_rpm=1800)
+print(f"Bending safety factor: {rating.safety_factor_bending}")
+print(f"Contact safety factor: {rating.safety_factor_contact}")
+```
+
+**Q: What's the difference between a Rack and a normal gear?**  
+A: A Rack has infinite pitch radius — it's a linearized gear that meshes with a rotational gear to convert between rotation and translation. It can only be driven (terminal in a `Transmission`).
+
+**Q: Can I mesh a Worm with a SpurGear?**  
+A: No. `Transmission._check_mesh()` will raise an error. Worms mesh only with WormWheels. This constraint is enforced everywhere, not silently ignored.
+
+**Q: How do I add custom material properties?**  
+A: `mecapy.materials.add_custom_material("my_alloy", yield_strength=450e6, elastic_modulus=210e9, ...)` — then use `material="my_alloy"` in any element constructor.
