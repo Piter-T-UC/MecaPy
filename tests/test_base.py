@@ -60,6 +60,6 @@ class TestInheritance:
         """Elements inherit calculate_stress from the base class."""
         from mecapy.bolts import Bolt
 
-        bolt = Bolt(diameter=10.0, length=50.0)
+        bolt = Bolt(size="M10", length=50.0)
         # 5000 N over an 80 mm^2 stress area -> 62.5 MPa
         assert bolt.calculate_stress(5000, 80) == pytest.approx(62.5)

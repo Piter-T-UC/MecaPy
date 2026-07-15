@@ -14,7 +14,7 @@ yielding.
 
     from mecapy.bolts import Bolt
 
-    bolt = Bolt(diameter=10.0, length=50.0, material="steel")
+    bolt = Bolt(size="M10", length=50.0, material="steel")
     stress = bolt.calculate_stress(force=5000, area=80)  # -> 62.5 MPa
     print(bolt.safety_factor(stress * 1e6))
 

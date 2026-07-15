@@ -33,6 +33,7 @@ setup(
         "numpy>=1.20",
         "scipy>=1.7",
         "sympy>=1.10",
+        "matplotlib>=3.5",
     ],
     extras_require={
         "dev": [
