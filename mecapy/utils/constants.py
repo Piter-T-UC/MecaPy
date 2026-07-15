@@ -34,6 +34,13 @@ MATERIALS = {
         "yield_strength": 180e6,  # Pa
         "shear_modulus": 64e9,  # Pa
     },
+    "bronze": {
+        "density": 8800,  # kg/m^3
+        "elastic_modulus": 110e9,  # Pa
+        "poisson_ratio": 0.34,
+        "yield_strength": 170e6,  # Pa (typical gear bronze, e.g. C90700)
+        "shear_modulus": 41e9,  # Pa
+    },
 }
 
 # Standard stress and strain values
@@ -45,3 +52,7 @@ MM_TO_M = 1e-3
 M_TO_MM = 1e3
 KPA_TO_PA = 1e3
 MPA_TO_PA = 1e6
+IN_TO_MM = 25.4
+LBF_TO_N = 4.4482216152605
+PSI_TO_MPA = 6.894757293168e-3
+HP_TO_KW = 0.7456998715823
