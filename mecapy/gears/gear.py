@@ -124,6 +124,33 @@ class Gear(MechaElement):
         self.pressure_angle = pressure_angle
         self.profile_shift = 0.0
 
+    def change_teeth(self, teeth):
+        """
+        Set a new tooth count on the same gear (for design iteration).
+
+        Every derived quantity is a computed property, so pitch, base,
+        outside and root diameters, undercut checks, pair-wise mesh
+        methods and :meth:`describe` all reflect the new count
+        immediately — just recompute after calling this.
+
+        Args:
+            teeth (int): New number of teeth. Same validity rule as the
+                constructor (integer >= the type's minimum).
+
+        Returns:
+            Gear: ``self``, so calls can be chained, e.g.
+            ``gear.change_teeth(20).pitch_diameter``.
+
+        Raises:
+            ValueError: If ``teeth`` is not a valid tooth count.
+        """
+        if teeth != int(teeth) or teeth < self._min_teeth:
+            raise ValueError(
+                f"Teeth must be an integer >= {self._min_teeth}, got {teeth}"
+            )
+        self.teeth = int(teeth)
+        return self
+
     # ------------------------------------------------------------------
     # Geometry (standard full-depth system, dimensions in mm)
     # ------------------------------------------------------------------

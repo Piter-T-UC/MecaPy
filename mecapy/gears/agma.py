@@ -160,50 +160,54 @@ def elastic_coefficient(pinion_properties, gear_properties):
                                        + (1 - nu2 ** 2) / e2)))
 
 
-def geometry_factor_I(pinion, gear_ratio, gear=None):
+def geometry_factor_I(pinion, gear=None):
     """
-    AGMA pitting-resistance (surface) geometry factor ZI (I).
+    Surface (pitting) geometry factor I per Norton, *Machine Design*.
 
-    ``ZI = cos(phi_t) sin(phi_t) / (2 mN) * mG / (mG + 1)`` for an
-    external mesh. For spur gears the load-sharing ratio mN is 1; for
-    helical gears ``mN = pN / (0.95 Z)`` with pN the normal base pitch
-    and Z the length of the line of action (Shigley Eq. 14-25).
+    ``I = cos(phi_t) / ((1/rho_p + 1/rho_g) dp)`` (Norton Eq. 12.22,
+    metric form) with the flank curvature radii taken one transverse
+    base pitch inside the pinion tip (lowest point of single-tooth
+    contact)::
+
+        rho_p = sqrt(ra_p^2 - rb_p^2) - pi mt cos(phi_t)
+        rho_g = C sin(phi_t) - rho_p
+
+    Profile shift enters through the pinion outside radius (addendum
+    m(1 + x)) and the working center distance C. Helical gears are
+    handled in the transverse plane (phi_t, mt). A rack flank is
+    straight, so ``gear=None`` uses ``1 / rho_g = 0``.
 
     Args:
         pinion (CylindricalGear): The pinion.
-        gear_ratio (float): mG = gear teeth / pinion teeth (>= 1).
-        gear (CylindricalGear): The mating gear; required for helical
-            meshes to compute the line of action.
+        gear (CylindricalGear): The mating gear; ``None`` for a pinion
+            driving a rack.
 
     Returns:
-        float: Geometry factor ZI (dimensionless).
+        float: Geometry factor I (ZI, dimensionless).
 
     Raises:
-        ValueError: If the ratio is below 1 or a helical mesh is missing
-            the gear argument.
+        ValueError: If contact falls below the pinion base circle
+            (rho_p <= 0) or the mesh has tip interference (rho_g <= 0).
     """
-    if gear_ratio < 1:
-        raise ValueError("Gear ratio mG must be >= 1 (gear/pinion teeth)")
     phi_t = math.radians(pinion.transverse_pressure_angle)
-    if pinion.helix_angle == 0:
-        m_n = 1.0
+    ra = pinion.outside_radius
+    rb = pinion.base_radius
+    base_pitch = math.pi * pinion.transverse_module * math.cos(phi_t)
+    rho_p = math.sqrt(ra ** 2 - rb ** 2) - base_pitch
+    if rho_p <= 0:
+        raise ValueError("Pinion contact falls below the base circle "
+                         "(rho_p <= 0); too few teeth or undercut")
+    if gear is None:
+        inv_rho_g = 0.0
     else:
-        if gear is None:
-            raise ValueError("Helical ZI needs the mating gear geometry")
-        # Length of the line of action, Eq. 14-25.
-        r_p = pinion.pitch_diameter / 2
-        r_g = gear.pitch_diameter / 2
-        a = pinion.module  # addendum = normal module
-        rb_p = pinion.base_diameter / 2
-        rb_g = gear.base_diameter / 2
-        z = (math.sqrt((r_p + a) ** 2 - rb_p ** 2)
-             + math.sqrt((r_g + a) ** 2 - rb_g ** 2)
-             - (r_p + r_g) * math.sin(phi_t))
-        p_normal_base = (math.pi * pinion.module
-                         * math.cos(math.radians(pinion.pressure_angle)))
-        m_n = p_normal_base / (0.95 * z)
-    return (math.cos(phi_t) * math.sin(phi_t) / (2 * m_n)
-            * gear_ratio / (gear_ratio + 1))
+        c = pinion.working_center_distance_with(gear)
+        rho_g = c * math.sin(phi_t) - rho_p
+        if rho_g <= 0:
+            raise ValueError("Gear flank curvature is non-positive "
+                             "(rho_g <= 0); mesh has tip interference")
+        inv_rho_g = 1.0 / rho_g
+    return (math.cos(phi_t)
+            / ((1.0 / rho_p + inv_rho_g) * pinion.pitch_diameter))
 
 
 def bending_life_factor(cycles=1e7):
@@ -231,7 +235,7 @@ def contact_life_factor(cycles=1e7):
     """
     AGMA pitting stress-cycle factor ZN (Fig. 14-15 fit).
 
-    ``ZN = 1.4488 N^-0.023`` (about 1.0 at 10^7 cycles).
+    ``ZN = 1.4488 N^-0.023`` (about 1.0 at 10^7 cycles) for steel.
 
     Args:
         cycles (float): Number of load cycles N (default: 1e7).
@@ -244,41 +248,11 @@ def contact_life_factor(cycles=1e7):
     """
     if cycles <= 0:
         raise ValueError("Cycle count must be strictly positive")
+    elif cycles <1e4:
+        return 1.5
+    elif cycles<1e7:
+        return 2.466 * cycles ** -0.056
     return 1.4488 * cycles ** -0.023
-
-
-def temperature_factor(temperature_c):
-    """
-    AGMA temperature (derating) factor Y_theta from a temperature.
-
-    ``Y_theta = 1`` for T < 110 C (no derating); ``Y_theta = (220 + T)
-    / 330`` for T >= 110 C. The two branches meet at 1.0 at 110 C, so
-    the factor is continuous. A larger Y_theta lowers the allowable
-    bending and contact stresses (it appears in the denominator of both
-    allowables); pass the result to :class:`AGMARating` through
-    ``temperature_factor`` (or use its ``temperature_celsius`` argument).
-
-    Args:
-        temperature_c (float): Operating (oil) temperature in degrees
-            Celsius.
-
-    Returns:
-        float: Temperature factor Y_theta (>= 1).
-
-    Raises:
-        ValueError: If the temperature is below absolute zero.
-    """
-    if temperature_c < -273.15:
-        raise ValueError("Temperature must be above absolute zero (-273.15 C)")
-    if temperature_c < 110.0:
-        return 1.0
-    return (220.0 + temperature_c) / 330.0
-
-
-# Module-private alias so AGMARating (whose constructor has a parameter
-# named ``temperature_factor``) can still reach the function above
-# despite the local-name shadow.
-_temperature_factor_from_temp = temperature_factor
 
 
 def hardness_ratio_factor(pinion_hardness, gear_hardness, gear_ratio):
@@ -341,8 +315,7 @@ class AGMARating:
                  KB=1.0, life_cycles=1e7, reliability=0.99, grade=1,
                  hardness_HB=None, gear_hardness_HB=None, St=None, Sc=None,
                  YJ_pinion=None, YJ_gear=None, condition="commercial",
-                 crowned=False, temperature_factor=1.0,
-                 temperature_celsius=None):
+                 crowned=False, temperature_factor=1.0):
         """
         Evaluate the AGMA rating of a pinion-gear (or pinion-rack) mesh.
 
@@ -382,12 +355,7 @@ class AGMARating:
                 (default "commercial").
             crowned (bool): Crowned teeth for KH (default False).
             temperature_factor (float): Y_theta (default 1.0, valid for
-                oil temperatures up to about 120 C). Give this OR
-                ``temperature_celsius``, not both.
-            temperature_celsius (float): Operating temperature in degrees
-                Celsius. When given, Y_theta is computed from it via
-                :func:`temperature_factor`; passing it together with a
-                non-default ``temperature_factor`` is an error.
+                oil temperatures up to about 120 C).
 
         Raises:
             ValueError: If the mesh is incompatible, face widths are
@@ -411,15 +379,6 @@ class AGMARating:
             raise ValueError(
                 "Give 'hardness_HB' (through-hardened steel fits) or "
                 "explicit 'St' and 'Sc' allowable stress numbers in MPa"
-            )
-        if temperature_celsius is not None:
-            if temperature_factor != 1.0:
-                raise ValueError(
-                    "Give exactly one of 'temperature_factor' or "
-                    "'temperature_celsius'"
-                )
-            temperature_factor = _temperature_factor_from_temp(
-                temperature_celsius
             )
 
         self.pinion = pinion
@@ -471,8 +430,7 @@ class AGMARating:
                             agma_data.geometry_factor_J(
                                 gear.teeth, pinion.teeth,
                                 gear.helix_angle))
-        self.ZI = geometry_factor_I(pinion, self.gear_ratio,
-                                    gear=None if is_rack else gear)
+        self.ZI = geometry_factor_I(pinion, gear=None if is_rack else gear)
         gear_props = (pinion.material_properties if is_rack
                       else gear.material_properties)
         self.ZE = elastic_coefficient(pinion.material_properties, gear_props)

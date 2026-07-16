@@ -90,6 +90,34 @@ class CylindricalGear(Gear):
         self.face_width = face_width
         self.profile_shift = profile_shift
 
+    def change_profile_shift(self, profile_shift):
+        """
+        Set a new profile shift coefficient x (for design iteration).
+
+        Everything that depends on x is a computed property or a
+        pair-wise method, so addendum, dedendum, outside/root diameter,
+        tooth thickness, :attr:`is_undercut` and the working
+        pressure-angle/center-distance pair methods all reflect the new
+        value immediately.
+
+        Args:
+            profile_shift (float): New coefficient x, -1 < x < 1
+                (0 = standard teeth), same rule as the constructor.
+
+        Returns:
+            CylindricalGear: ``self``, so calls can be chained, e.g.
+            ``pinion.change_profile_shift(0.3).is_undercut``.
+
+        Raises:
+            ValueError: If ``profile_shift`` is outside (-1, 1).
+        """
+        if not -1.0 < profile_shift < 1.0:
+            raise ValueError(
+                "Profile shift coefficient must satisfy -1 < x < 1"
+            )
+        self.profile_shift = profile_shift
+        return self
+
     # ------------------------------------------------------------------
     # Transverse geometry
     # ------------------------------------------------------------------

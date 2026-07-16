@@ -48,10 +48,22 @@ class TestFactors:
         assert ze == pytest.approx(190.0, rel=0.02)
 
     def test_geometry_factor_I(self):
-        """ZI for a 20 deg spur mesh with mG = 52/17."""
+        """Norton I for a 20 deg 17/52 spur mesh (Eq. 12.22)."""
         pinion = SpurGear(17, module=2.54)
-        zi = agma.geometry_factor_I(pinion, 52.0 / 17.0)
-        assert zi == pytest.approx(0.121, abs=0.001)
+        gear = SpurGear(52, module=2.54)
+        zi = agma.geometry_factor_I(pinion, gear)
+        assert zi == pytest.approx(0.0986, abs=0.001)
+        # Dimensionless: independent of module.
+        assert zi == pytest.approx(
+            agma.geometry_factor_I(SpurGear(17, module=1.0),
+                                   SpurGear(52, module=1.0)))
+
+    def test_geometry_factor_I_rack(self):
+        """Rack mesh (gear=None) drops the gear curvature term."""
+        pinion = SpurGear(17, module=2.54)
+        gear = SpurGear(52, module=2.54)
+        zi_rack = agma.geometry_factor_I(pinion)
+        assert zi_rack > agma.geometry_factor_I(pinion, gear)
 
     def test_life_factors_at_1e7(self):
         """YN and ZN are about 1.0 at 10^7 cycles."""
@@ -120,18 +132,19 @@ class TestShigleyExample:
         assert rating.Ft == pytest.approx(733.0, rel=0.01)
 
     def test_intermediate_factors(self, rating):
-        """Kv, KH and ZI within 1% of the book values."""
+        """Kv, KH per Shigley; ZI per Norton Eq. 12.22."""
         assert rating.Kv == pytest.approx(1.377, rel=0.01)
         assert rating.KH == pytest.approx(1.22, rel=0.01)
-        assert rating.ZI == pytest.approx(0.121, rel=0.01)
+        assert rating.ZI == pytest.approx(0.0986, rel=0.01)
 
     def test_bending_stress(self, rating):
         """sigma_F about 6.15 kpsi = 42.4 MPa (5%: digitized J)."""
         assert rating.bending_stress_pinion == pytest.approx(42.4, rel=0.05)
 
     def test_contact_stress(self, rating):
-        """sigma_H about 68.9 kpsi = 475 MPa (5%)."""
-        assert rating.contact_stress == pytest.approx(475.0, rel=0.05)
+        """Shigley's 475 MPa scaled by sqrt(0.121 / 0.0986) for
+        Norton's I: about 526 MPa (5%)."""
+        assert rating.contact_stress == pytest.approx(526.0, rel=0.05)
 
     def test_safety_factors_positive(self, rating):
         """Safety factors and allowables are computed and positive."""
@@ -221,6 +234,8 @@ class TestRatingValidation:
                             pinion_speed_rpm=1200, hardness_HB=300)
         assert rating.bending_stress_pinion > 0
         assert rating.contact_stress > 0
-        # Helical ZI exceeds the spur value thanks to load sharing.
-        spur_zi = agma.geometry_factor_I(SpurGear(20, module=3.0), 3.0)
+        # Helical ZI exceeds the spur value thanks to the larger
+        # transverse pressure angle (Norton I in the transverse plane).
+        spur_zi = agma.geometry_factor_I(SpurGear(20, module=3.0),
+                                         SpurGear(60, module=3.0))
         assert rating.ZI > spur_zi

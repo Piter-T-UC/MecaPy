@@ -154,6 +154,65 @@ class TestProfileShift:
             SpurGear(teeth=20, module=2.5, profile_shift=1.5)
 
 
+class TestChangeMethods:
+    """change_teeth() and change_profile_shift() design-iteration setters."""
+
+    def test_change_teeth_updates_geometry(self):
+        """All derived geometry follows the new tooth count."""
+        gear = SpurGear(teeth=17, module=2.5)
+        result = gear.change_teeth(20)
+        assert result is gear  # chainable
+        assert gear.teeth == 20
+        assert gear.pitch_diameter == pytest.approx(50.0)
+        fresh = SpurGear(teeth=20, module=2.5)
+        assert gear.base_diameter == pytest.approx(fresh.base_diameter)
+        assert gear.outside_diameter == pytest.approx(fresh.outside_diameter)
+
+    def test_change_teeth_updates_pair_methods(self):
+        """Mesh results recompute with the new count."""
+        pinion = SpurGear(teeth=17, module=2.0)
+        gear = SpurGear(teeth=51, module=2.0)
+        before = pinion.center_distance_with(gear)
+        pinion.change_teeth(20)
+        assert pinion.center_distance_with(gear) == pytest.approx(before + 3.0)
+
+    def test_change_teeth_validation(self):
+        """Same rules as the constructor; gear left untouched on error."""
+        gear = SpurGear(teeth=17, module=2.5)
+        with pytest.raises(ValueError):
+            gear.change_teeth(3)  # below cylindrical minimum
+        with pytest.raises(ValueError):
+            gear.change_teeth(20.5)
+        assert gear.teeth == 17
+
+    def test_change_profile_shift(self):
+        """Shifted geometry and undercut check follow the new x."""
+        gear = SpurGear(teeth=14, module=2.5)
+        assert gear.is_undercut
+        result = gear.change_profile_shift(0.4)
+        assert result is gear  # chainable
+        assert not gear.is_undercut
+        assert gear.addendum == pytest.approx(2.5 * 1.4)
+        fresh = SpurGear(teeth=14, module=2.5, profile_shift=0.4)
+        assert gear.outside_diameter == pytest.approx(fresh.outside_diameter)
+        assert gear.tooth_thickness == pytest.approx(fresh.tooth_thickness)
+
+    def test_change_profile_shift_validation(self):
+        """x must satisfy -1 < x < 1; gear left untouched on error."""
+        gear = SpurGear(teeth=20, module=2.5, profile_shift=0.2)
+        with pytest.raises(ValueError):
+            gear.change_profile_shift(1.0)
+        with pytest.raises(ValueError):
+            gear.change_profile_shift(-1.5)
+        assert gear.profile_shift == pytest.approx(0.2)
+
+    def test_chained_iteration(self):
+        """The two setters chain for quick what-if loops."""
+        gear = SpurGear(teeth=14, module=2.0)
+        od = gear.change_teeth(18).change_profile_shift(0.1).outside_diameter
+        assert od == pytest.approx(18 * 2.0 + 2 * 2.0 * 1.1)
+
+
 class TestUndercut:
     """Undercut check with and without profile shift."""
 
