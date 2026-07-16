@@ -117,9 +117,19 @@ through `mecapy/materials.py` (`get_material_properties`, `get_available_materia
 **Purpose:** power transmission through tooth mesh.
 
 - **`Gear`** — base class, standard full-depth involute geometry
-  - Common to all types: pitch/base/outside/root diameters, addendum/dedendum
+  - Common to all types: pitch/base/outside/root diameters (+ `*_radius` accessors),
+    addendum/dedendum, clearance, working/whole depth, tooth thickness, base pitch
+  - `describe()` returns a multi-line report of every parameter with symbol and unit
+    (e.g. `addendum (ha) = 2.500 mm`); subclasses extend it (helix block, undercut check)
+  - `involute()` / `inverse_involute()` helpers live in `gear.py` and are exported
   - Accepts `module` (mm, SI) OR `diametral_pitch` (teeth/inch) — exactly one required
   - All downstream code works in metric internally
+- **Profile shift** (cylindrical gears only): pass `profile_shift=x` (-1 < x < 1) to any
+  cylindrical gear — addendum m(1+x), dedendum m(1.25-x), tooth thickness follow.
+  `min_profile_shift` / `is_undercut` check undercut; pair methods
+  `working_pressure_angle_with()`, `working_center_distance_with()` and
+  `has_interference_with()` handle shifted meshes (`center_distance_with()` stays the
+  reference distance). AGMA tables assume x = 0 (ratings for shifted gears are approximate).
 - **`CylindricalGear`** family:
   - **`SpurGear`** — parallel axes, no helix angle
   - **`HelicalGear`** — parallel axes with helix angle (requires hand: "right"/"left")

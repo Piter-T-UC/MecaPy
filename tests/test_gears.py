@@ -13,6 +13,8 @@ from mecapy.gears import (
     Worm,
     WormWheel,
     PlanetaryGearSet,
+    involute,
+    inverse_involute,
 )
 
 
@@ -76,6 +78,199 @@ class TestSpurGear:
             SpurGear(teeth=20)
         with pytest.raises(ValueError):
             SpurGear(teeth=20, module=2.5, pressure_angle=50)
+
+
+class TestGeometryExtras:
+    """Full standard-geometry property set (x = 0 regression)."""
+
+    def test_rack_constants(self):
+        """Clearance, working and whole depth from the basic rack."""
+        gear = SpurGear(teeth=20, module=2.5)
+        assert gear.clearance == pytest.approx(0.625)
+        assert gear.working_depth == pytest.approx(5.0)
+        assert gear.whole_depth == pytest.approx(5.625)
+
+    def test_thickness_and_pitches(self):
+        """Tooth thickness pi*m/2 and base pitch pi*m*cos(alpha)."""
+        gear = SpurGear(teeth=20, module=2.5)
+        assert gear.tooth_thickness == pytest.approx(3.927, abs=1e-3)
+        assert gear.base_pitch == pytest.approx(7.380, abs=1e-3)
+
+    def test_radii(self):
+        """Radius accessors are half the diameters."""
+        gear = SpurGear(teeth=20, module=2.5)
+        assert gear.pitch_radius == pytest.approx(25.0)
+        assert gear.base_radius == pytest.approx(23.492, abs=1e-3)
+        assert gear.outside_radius == pytest.approx(27.5)
+        assert gear.root_radius == pytest.approx(21.875)
+
+    def test_involute_round_trip(self):
+        """inv(20 deg) and its inverse."""
+        angle = math.radians(20)
+        assert involute(angle) == pytest.approx(0.0149044, abs=1e-6)
+        assert inverse_involute(involute(angle)) == pytest.approx(
+            angle, abs=1e-9)
+        assert inverse_involute(0.0) == 0.0
+        with pytest.raises(ValueError):
+            inverse_involute(-0.01)
+
+    def test_default_shift_zero(self):
+        """Standard gears have x = 0 and an unchanged repr."""
+        gear = SpurGear(teeth=20, module=2.5)
+        assert gear.profile_shift == 0.0
+        assert "x=" not in repr(gear)
+
+
+class TestProfileShift:
+    """Profile-shifted (x != 0) geometry."""
+
+    def test_shifted_geometry(self):
+        """z=20, m=2.5, x=0.3 addendum/dedendum and diameters."""
+        gear = SpurGear(teeth=20, module=2.5, profile_shift=0.3)
+        assert gear.addendum == pytest.approx(3.25)
+        assert gear.dedendum == pytest.approx(2.375)
+        assert gear.outside_diameter == pytest.approx(56.5)
+        assert gear.root_diameter == pytest.approx(45.25)
+        assert gear.tooth_thickness == pytest.approx(4.473, abs=1e-3)
+
+    def test_shift_invariants(self):
+        """Whole depth and clearance do not change with x."""
+        gear = SpurGear(teeth=20, module=2.5, profile_shift=0.3)
+        assert gear.whole_depth == pytest.approx(5.625)
+        assert gear.clearance == pytest.approx(0.625)
+
+    def test_repr_shows_shift(self):
+        """repr includes x only when nonzero."""
+        gear = SpurGear(teeth=20, module=2.5, profile_shift=0.3)
+        assert "x=0.3" in repr(gear)
+
+    def test_validation(self):
+        """x must satisfy -1 < x < 1."""
+        with pytest.raises(ValueError):
+            SpurGear(teeth=20, module=2.5, profile_shift=1.0)
+        with pytest.raises(ValueError):
+            SpurGear(teeth=20, module=2.5, profile_shift=-1.0)
+        with pytest.raises(ValueError):
+            SpurGear(teeth=20, module=2.5, profile_shift=1.5)
+
+
+class TestUndercut:
+    """Undercut check with and without profile shift."""
+
+    def test_small_pinion_undercut(self):
+        """12 teeth at 20 deg is undercut; x_min = 1 - z sin^2/2."""
+        pinion = SpurGear(teeth=12, module=2.0)
+        assert pinion.min_profile_shift == pytest.approx(0.29813, abs=1e-4)
+        assert pinion.is_undercut
+
+    def test_shift_cures_undercut(self):
+        """x = 0.3 >= x_min avoids the undercut."""
+        pinion = SpurGear(teeth=12, module=2.0, profile_shift=0.3)
+        assert not pinion.is_undercut
+
+    def test_large_gear_not_undercut(self):
+        """20 teeth needs no shift (x_min < 0)."""
+        gear = SpurGear(teeth=20, module=2.0)
+        assert gear.min_profile_shift == pytest.approx(-0.16978, abs=1e-4)
+        assert not gear.is_undercut
+
+    def test_helical_limit(self):
+        """Helix relaxes the limit via cos(beta) and phi_t."""
+        gear = HelicalGear(teeth=20, module=3.0, helix_angle=25.0,
+                           hand="right")
+        assert gear.min_profile_shift == pytest.approx(-0.53238, abs=1e-4)
+
+
+class TestShiftedMesh:
+    """Working pressure angle and center distance for shifted pairs."""
+
+    def test_working_values(self):
+        """12/24 pair, m=2, pinion x=0.3."""
+        pinion = SpurGear(teeth=12, module=2.0, profile_shift=0.3)
+        gear = SpurGear(teeth=24, module=2.0)
+        assert pinion.working_pressure_angle_with(gear) == pytest.approx(
+            22.317, abs=1e-3)
+        assert pinion.center_distance_with(gear) == pytest.approx(36.0)
+        assert pinion.working_center_distance_with(gear) == pytest.approx(
+            36.568, abs=1e-3)
+
+    def test_zero_shift_matches_reference(self):
+        """With x1 + x2 = 0 the working values equal the reference."""
+        pinion = SpurGear(teeth=20, module=2.5)
+        gear = SpurGear(teeth=40, module=2.5)
+        assert pinion.working_pressure_angle_with(gear) == pytest.approx(
+            20.0, abs=1e-9)
+        assert pinion.working_center_distance_with(gear) == pytest.approx(
+            75.0, abs=1e-9)
+
+    def test_shifted_contact_ratio(self):
+        """Contact ratio uses the working center distance."""
+        pinion = SpurGear(teeth=12, module=2.0, profile_shift=0.3)
+        gear = SpurGear(teeth=24, module=2.0)
+        assert pinion.contact_ratio_with(gear) == pytest.approx(
+            1.410, abs=1e-3)
+
+
+class TestInterference:
+    """Tip (involute) interference checks."""
+
+    def test_large_ratio_interferes(self):
+        """10/40 at m=2: the gear tip passes the pinion limit."""
+        pinion = SpurGear(teeth=10, module=2.0)
+        gear = SpurGear(teeth=40, module=2.0)
+        assert pinion.has_interference_with(gear)
+
+    def test_standard_pair_clean(self):
+        """20/40 at m=2 has no interference."""
+        pinion = SpurGear(teeth=20, module=2.0)
+        gear = SpurGear(teeth=40, module=2.0)
+        assert not pinion.has_interference_with(gear)
+
+    def test_shift_cures_interference(self):
+        """12/24 interferes at x=0; pinion x=0.3 cures it."""
+        gear = SpurGear(teeth=24, module=2.0)
+        assert SpurGear(teeth=12, module=2.0).has_interference_with(gear)
+        shifted = SpurGear(teeth=12, module=2.0, profile_shift=0.3)
+        assert not shifted.has_interference_with(gear)
+
+    def test_symmetric(self):
+        """The check gives the same answer from either member."""
+        pinion = SpurGear(teeth=10, module=2.0)
+        gear = SpurGear(teeth=40, module=2.0)
+        assert (pinion.has_interference_with(gear)
+                == gear.has_interference_with(pinion))
+
+
+class TestDescribe:
+    """describe() geometry report."""
+
+    def test_spur_content(self):
+        """All standard parameters appear with symbol and unit."""
+        report = SpurGear(teeth=20, module=2.5).describe()
+        assert isinstance(report, str)
+        assert "addendum (ha) = 2.500 mm" in report
+        assert "dedendum (hf) = 3.125 mm" in report
+        assert "clearance (c) = 0.625 mm" in report
+        assert "tooth thickness (s) = 3.927 mm" in report
+        assert "profile shift coefficient (x) = 0.000" in report
+        assert "min teeth without undercut (Zmin) = 18" in report
+        assert "undercut = no" in report
+        assert "helix angle" not in report
+
+    def test_helical_content(self):
+        """Helical report adds the transverse/helix block."""
+        report = HelicalGear(teeth=20, module=3.0, helix_angle=25.0,
+                             hand="right").describe()
+        assert "helix angle (beta) = 25.000 deg" in report
+        assert "hand = right" in report
+        assert "transverse module (mt) = 3.310 mm" in report
+
+    def test_herringbone_has_no_hand_line(self):
+        """Herringbone (hand=None) omits the hand line."""
+        report = HerringboneGear(teeth=30, module=3.0,
+                                 helix_angle=30.0).describe()
+        assert "helix angle (beta) = 30.000 deg" in report
+        assert "hand =" not in report
 
 
 class TestUnits:

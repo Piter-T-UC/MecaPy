@@ -284,6 +284,10 @@ class AGMARating:
     construction; results are plain attributes. The first gear is the
     pinion (driver); the mate may be a gear or a :class:`Rack`.
 
+    Note: the digitized J-factor and Lewis tables assume standard
+    (profile shift x = 0) tooth proportions; ratings for
+    profile-shifted gears are approximate.
+
     Attributes:
         Ft (float): Tangential force in N.
         pitch_line_velocity (float): In m/s.

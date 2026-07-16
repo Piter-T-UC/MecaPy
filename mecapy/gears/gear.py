@@ -15,6 +15,47 @@ import math
 from ..base import MechaElement
 
 
+def involute(angle):
+    """
+    Involute function inv(angle) = tan(angle) - angle.
+
+    Args:
+        angle (float): Angle in radians.
+
+    Returns:
+        float: Involute of the angle (dimensionless).
+    """
+    return math.tan(angle) - angle
+
+
+def inverse_involute(value):
+    """
+    Angle whose involute equals ``value`` (inverse of :func:`involute`).
+
+    Solved by Newton iteration on ``tan(x) - x - value = 0``.
+
+    Args:
+        value (float): Involute value (dimensionless, >= 0).
+
+    Returns:
+        float: Angle in radians.
+
+    Raises:
+        ValueError: If ``value`` is negative.
+    """
+    if value < 0:
+        raise ValueError("Involute value must be non-negative")
+    if value == 0:
+        return 0.0
+    angle = 0.3
+    for _ in range(100):
+        f = math.tan(angle) - angle - value
+        if abs(f) < 1e-12:
+            break
+        angle -= f / math.tan(angle) ** 2
+    return angle
+
+
 class Gear(MechaElement):
     """
     Base class for gears (standard full-depth involute teeth).
@@ -29,6 +70,9 @@ class Gear(MechaElement):
         teeth (int): Number of teeth.
         module (float): Gear module in mm.
         pressure_angle (float): Pressure angle in degrees (default 20).
+        profile_shift (float): Profile shift coefficient x (dimensionless,
+            0 for standard teeth). Settable through the cylindrical gear
+            constructors; always 0 for other gear types.
         material (str): Material type.
     """
 
@@ -78,6 +122,7 @@ class Gear(MechaElement):
         self.teeth = int(teeth)
         self.module = module
         self.pressure_angle = pressure_angle
+        self.profile_shift = 0.0
 
     # ------------------------------------------------------------------
     # Geometry (standard full-depth system, dimensions in mm)
@@ -100,13 +145,13 @@ class Gear(MechaElement):
 
     @property
     def addendum(self):
-        """float: Addendum in mm (equal to the module)."""
-        return self.module
+        """float: Addendum in mm, ha = m * (1 + x)."""
+        return self.module * (1 + self.profile_shift)
 
     @property
     def dedendum(self):
-        """float: Dedendum in mm (1.25 * module)."""
-        return 1.25 * self.module
+        """float: Dedendum in mm, hf = m * (1.25 - x)."""
+        return self.module * (1.25 - self.profile_shift)
 
     @property
     def outside_diameter(self):
@@ -120,16 +165,104 @@ class Gear(MechaElement):
 
     @property
     def whole_depth(self):
-        """float: Whole tooth depth in mm (2.25 * module)."""
-        return 2.25 * self.module
+        """float: Whole tooth depth in mm (addendum + dedendum, 2.25 * m)."""
+        return self.addendum + self.dedendum
 
     @property
     def base_diameter(self):
         """float: Base circle diameter in mm (d * cos(pressure angle))."""
         return self.pitch_diameter * math.cos(math.radians(self.pressure_angle))
 
+    @property
+    def clearance(self):
+        """float: Bottom clearance in mm (c = 0.25 * m, independent of x)."""
+        return 0.25 * self.module
+
+    @property
+    def working_depth(self):
+        """float: Working depth in mm (hk = 2 * m, basic rack)."""
+        return 2.0 * self.module
+
+    @property
+    def tooth_thickness(self):
+        """float: Arc tooth thickness at the pitch circle in mm.
+
+        s = m * (pi / 2 + 2 * x * tan(alpha)). For helical gears this is
+        the normal tooth thickness.
+        """
+        alpha = math.radians(self.pressure_angle)
+        return self.module * (math.pi / 2
+                              + 2 * self.profile_shift * math.tan(alpha))
+
+    @property
+    def base_pitch(self):
+        """float: Base pitch in mm (pb = pi * m * cos(alpha)).
+
+        Normal base pitch for helical gears.
+        """
+        return math.pi * self.module * math.cos(
+            math.radians(self.pressure_angle))
+
+    @property
+    def pitch_radius(self):
+        """float: Pitch radius in mm (pitch_diameter / 2)."""
+        return self.pitch_diameter / 2
+
+    @property
+    def base_radius(self):
+        """float: Base circle radius in mm (base_diameter / 2)."""
+        return self.base_diameter / 2
+
+    @property
+    def outside_radius(self):
+        """float: Outside (tip) radius in mm (outside_diameter / 2)."""
+        return self.outside_diameter / 2
+
+    @property
+    def root_radius(self):
+        """float: Root radius in mm (root_diameter / 2)."""
+        return self.root_diameter / 2
+
+    def describe(self):
+        """
+        Multi-line summary of every geometry parameter.
+
+        Each line is formatted as ``label (symbol) = value unit``, e.g.
+        ``addendum (ha) = 2.500 mm``. The string is returned, not
+        printed; use ``print(gear.describe())``.
+
+        Returns:
+            str: Formatted geometry report.
+        """
+        header = f"{self.__class__.__name__} geometry"
+        if self.name:
+            header += f" '{self.name}'"
+        lines = [
+            header,
+            "=" * 40,
+            f"number of teeth (z) = {self.teeth}",
+            f"module (m) = {self.module:.3f} mm",
+            f"pressure angle (alpha) = {self.pressure_angle:.3f} deg",
+            f"profile shift coefficient (x) = {self.profile_shift:.3f}",
+            f"pitch diameter (d) = {self.pitch_diameter:.3f} mm",
+            f"base diameter (db) = {self.base_diameter:.3f} mm",
+            f"outside diameter (da) = {self.outside_diameter:.3f} mm",
+            f"root diameter (df) = {self.root_diameter:.3f} mm",
+            f"circular pitch (p) = {self.circular_pitch:.3f} mm",
+            f"base pitch (pb) = {self.base_pitch:.3f} mm",
+            f"tooth thickness (s) = {self.tooth_thickness:.3f} mm",
+            f"addendum (ha) = {self.addendum:.3f} mm",
+            f"dedendum (hf) = {self.dedendum:.3f} mm",
+            f"whole depth (h) = {self.whole_depth:.3f} mm",
+            f"working depth (hk) = {self.working_depth:.3f} mm",
+            f"clearance (c) = {self.clearance:.3f} mm",
+        ]
+        return "\n".join(lines)
+
     def __repr__(self):
+        shift = (f", x={self.profile_shift}"
+                 if self.profile_shift != 0 else "")
         return (
             f"{self.__class__.__name__}(teeth={self.teeth}, "
-            f"module={self.module}, material={self.material!r})"
+            f"module={self.module}{shift}, material={self.material!r})"
         )

@@ -14,7 +14,7 @@ Gear types, transmissions and AGMA fatigue rating:
   (:class:`~mecapy.gears.agma.AGMARating`).
 """
 
-from .gear import Gear
+from .gear import Gear, inverse_involute, involute
 from .cylindrical import (
     CylindricalGear,
     SpurGear,
@@ -42,6 +42,8 @@ __all__ = [
     "PlanetaryGearSet",
     "Transmission",
     "AGMARating",
+    "involute",
+    "inverse_involute",
     "agma",
     "agma_data",
 ]

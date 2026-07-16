@@ -22,11 +22,12 @@ from .worm import Worm, WormWheel
 def _check_mesh(driver, driven):
     """
     Validate that two elements can mesh, raising ValueError otherwise.
-
     Checks the type pairing (spur with spur or rack, helical with
     helical of opposite hand, herringbone with herringbone, bevel with
     bevel, worm with worm wheel), equal module (normal module for
-    helical, axial for a worm) and equal pressure angle.
+    helical, axial for a worm) and equal pressure angle. Profile shift
+    does not affect mesh compatibility (it only moves the working
+    center distance).
 
     Args:
         driver: Driving element (Gear subclass or Worm).
