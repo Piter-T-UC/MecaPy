@@ -255,6 +255,35 @@ def contact_life_factor(cycles=1e7):
     return 1.4488 * cycles ** -0.023
 
 
+def temperature_factor(temperature_c):
+    """
+    AGMA temperature (derating) factor Y_theta from a temperature.
+
+    ``Y_theta = 1.0`` for oil temperature T <= 110 C; above 110 C,
+    ``Y_theta = (220 + T) / 330``. Use the result as a divisor in the
+    allowable-stress calculation to derate strength at elevated
+    temperatures (e.g. ``allowable = base / temperature_factor``).
+
+    Args:
+        temperature_c (float): Operating (oil) temperature in degrees
+            Celsius.
+
+    Returns:
+        float: Temperature factor Y_theta (>= 1).
+
+    Raises:
+        ValueError: If the temperature is below absolute zero.
+    """
+    if temperature_c < -273.15:
+        raise ValueError("Temperature must be above absolute zero (-273.15 C)")
+    if temperature_c < 110.0:
+        return 1.0
+    return (220.0 + temperature_c) / 330.0
+
+
+_temperature_factor_from_temp = temperature_factor
+
+
 def hardness_ratio_factor(pinion_hardness, gear_hardness, gear_ratio):
     """
     AGMA hardness-ratio factor ZW (CH), applied to the GEAR only.
@@ -315,7 +344,7 @@ class AGMARating:
                  KB=1.0, life_cycles=1e7, reliability=0.99, grade=1,
                  hardness_HB=None, gear_hardness_HB=None, St=None, Sc=None,
                  YJ_pinion=None, YJ_gear=None, condition="commercial",
-                 crowned=False, temperature_factor=1.0):
+                 crowned=False, temperature_factor=1.0, temperature_celsius=60):
         """
         Evaluate the AGMA rating of a pinion-gear (or pinion-rack) mesh.
 
@@ -355,12 +384,17 @@ class AGMARating:
                 (default "commercial").
             crowned (bool): Crowned teeth for KH (default False).
             temperature_factor (float): Y_theta (default 1.0, valid for
-                oil temperatures up to about 120 C).
+                oil temperatures up to about 120 C). Give this OR
+                ``temperature_celsius``, not both.
+            temperature_celsius (float): Operating temperature in degrees
+                Celsius; converted to Y_theta via :func:`temperature_factor`.
+                Mutually exclusive with ``temperature_factor``.
 
         Raises:
             ValueError: If the mesh is incompatible, face widths are
-                missing, the load specification is ambiguous, or no
-                material allowable can be determined.
+                missing, the load specification is ambiguous, no
+                material allowable can be determined, or both (or neither)
+                temperature inputs are given.
         """
         from .transmission import _check_mesh
 
@@ -380,6 +414,13 @@ class AGMARating:
                 "Give 'hardness_HB' (through-hardened steel fits) or "
                 "explicit 'St' and 'Sc' allowable stress numbers in MPa"
             )
+        if (temperature_factor != 1.0) and (temperature_celsius is not None):
+            raise ValueError(
+                "Give 'temperature_factor' (explicit Y_theta) or "
+                "'temperature_celsius' (oil temperature), not both"
+            )
+        if temperature_celsius is not None:
+            temperature_factor = _temperature_factor_from_temp(temperature_celsius)
 
         self.pinion = pinion
         self.gear = gear
