@@ -71,6 +71,14 @@ class TestFactors:
         assert agma.hardness_ratio_factor(300, 300, 3.0) == 1.0
         assert agma.hardness_ratio_factor(450, 300, 3.0) > 1.0
 
+    def test_temperature_factor(self):
+        """Y_theta is 1 below 110 C, continuous at 110, grows above."""
+        assert agma.temperature_factor(90) == 1.0
+        assert agma.temperature_factor(110) == pytest.approx(1.0)
+        assert agma.temperature_factor(230) == pytest.approx(1.3636, rel=1e-3)
+        with pytest.raises(ValueError):
+            agma.temperature_factor(-300)
+
     def test_allowable_stress_fits(self):
         """Grade 1 fits at HB 300."""
         st = agma_data.allowable_bending_stress(300, grade=1)
@@ -175,6 +183,23 @@ class TestRatingValidation:
                             St=steel["St"], Sc=steel["Sc"])
         assert rating.St == steel["St"]
         assert rating.SH > 0
+
+    def test_temperature_celsius(self):
+        """temperature_celsius derates the allowables via Y_theta."""
+        pinion = SpurGear(17, module=2.5, face_width=40.0)
+        gear = SpurGear(52, module=2.5, face_width=40.0)
+        base = AGMARating(pinion, gear, power_kw=3.0, pinion_speed_rpm=1800,
+                          hardness_HB=240)
+        hot = AGMARating(pinion, gear, power_kw=3.0, pinion_speed_rpm=1800,
+                         hardness_HB=240, temperature_celsius=200)
+        assert hot.temperature_factor == pytest.approx(agma.temperature_factor(200))
+        assert hot.allowable_bending_stress < base.allowable_bending_stress
+        assert hot.allowable_contact_stress < base.allowable_contact_stress
+        # Giving both temperature inputs is an error.
+        with pytest.raises(ValueError):
+            AGMARating(pinion, gear, power_kw=3.0, pinion_speed_rpm=1800,
+                       hardness_HB=240, temperature_celsius=200,
+                       temperature_factor=1.2)
 
     def test_rack_mesh(self):
         """A pinion on a rack rates via the rack J column."""

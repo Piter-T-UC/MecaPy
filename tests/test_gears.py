@@ -452,3 +452,91 @@ class TestPlanetary:
         assert ps.ratio("sun", "carrier", "ring") == pytest.approx(3.5)
         with pytest.raises(ValueError):
             PlanetaryGearSet(sun, SpurGear(18, module=3.0), ring)
+
+
+class TestForces:
+    """Force and moment export across the gear types."""
+
+    def test_spur_force_report(self):
+        """Spur: no thrust, torque = Ft * pitch radius = 9549 P / n."""
+        gear = SpurGear(teeth=20, module=2.0)
+        f = gear.force_report(power_kw=10.0, speed_rpm=1800.0)
+        assert f["Fa"] == 0.0
+        assert f["moment"] == 0.0
+        assert f["Fr"] == pytest.approx(f["Ft"] * math.tan(math.radians(20)))
+        assert f["torque"] == pytest.approx(f["Ft"] * gear.pitch_radius / 1000)
+        assert f["torque"] == pytest.approx(9549 * 10.0 / 1800.0, rel=1e-3)
+
+    def test_helical_force_report(self):
+        """Helical: axial thrust Ft * tan(beta) and a non-zero moment."""
+        gear = HelicalGear(teeth=20, module=2.0, helix_angle=25.0,
+                           hand="right")
+        f = gear.force_report(power_kw=10.0, speed_rpm=1800.0)
+        assert f["Fa"] == pytest.approx(f["Ft"] * math.tan(math.radians(25)))
+        assert f["moment"] > 0
+        # Radial uses the transverse pressure angle.
+        phi_t = math.radians(gear.transverse_pressure_angle)
+        assert f["Fr"] == pytest.approx(f["Ft"] * math.tan(phi_t))
+
+    def test_herringbone_no_thrust(self):
+        """Herringbone thrust cancels: Fa and moment are zero."""
+        gear = HerringboneGear(teeth=30, module=3.0, helix_angle=30.0)
+        f = gear.force_report(power_kw=5.0, speed_rpm=1000.0)
+        assert f["Fa"] == 0.0
+        assert f["moment"] == 0.0
+        assert f["Ft"] > 0
+
+    def test_force_report_validation(self):
+        """Non-positive power or speed raises."""
+        gear = SpurGear(teeth=20, module=2.0)
+        with pytest.raises(ValueError):
+            gear.force_report(power_kw=0.0, speed_rpm=1800.0)
+        with pytest.raises(ValueError):
+            gear.force_report(power_kw=10.0, speed_rpm=0.0)
+
+    def test_describe_forces_text(self):
+        """The report is a formatted string naming the components."""
+        gear = SpurGear(teeth=20, module=2.0, name="pinion")
+        text = gear.describe_forces(power_kw=10.0, speed_rpm=1800.0)
+        assert "tangential force (Ft)" in text
+        assert "torque (T)" in text
+        assert "pinion" in text
+
+    def test_bevel_force_report(self):
+        """Bevel forces at the mean radius; torque = Ft * r_mean."""
+        pinion = BevelGear(teeth=16, module=3.0, face_width=12.0)
+        gear = BevelGear(teeth=32, module=3.0)
+        f = pinion.force_report(power_kw=5.0, speed_rpm=1200.0, mate=gear)
+        r_mean = pinion.mean_radius_with(gear)
+        assert f["Ft"] > 0 and f["Fr"] > 0 and f["Fa"] > 0
+        assert f["torque"] == pytest.approx(f["Ft"] * r_mean / 1000)
+        # Radial and axial split Ft*tan(phi) by the cone angle.
+        gamma = math.radians(pinion.pitch_cone_angle_with(gear))
+        ft_tan = f["Ft"] * math.tan(math.radians(20))
+        assert f["Fr"] == pytest.approx(ft_tan * math.cos(gamma))
+        assert f["Fa"] == pytest.approx(ft_tan * math.sin(gamma))
+
+    def test_worm_drive_forces_couple(self):
+        """Worm axial equals wheel tangential; separating is shared."""
+        worm = Worm(starts=2, module=4.0, pitch_diameter=50.0)
+        wheel = WormWheel(teeth=40, module=4.0)
+        fw = worm.force_report(power_kw=3.0, speed_rpm=1750.0, wheel=wheel)
+        assert fw["Ft"] > 0 and fw["Fr"] > 0 and fw["Fa"] > 0
+        # Worm axial thrust is the wheel tangential (output) force.
+        assert fw["Fa"] == pytest.approx(fw["wheel_tangential"])
+        # Wheel-side view: its tangential is the worm axial, and vice versa.
+        wheel_speed = 1750.0 / worm.ratio_with(wheel)
+        fg = wheel.force_report(power_kw=3.0, speed_rpm=wheel_speed, worm=worm)
+        assert fg["Ft"] == pytest.approx(fw["Fa"])
+        assert fg["Fa"] == pytest.approx(fw["Ft"])
+        assert fg["Fr"] == pytest.approx(fw["Fr"])
+
+    def test_rack_force_report(self):
+        """Rack reacts the pinion tangential force, no torque."""
+        rack = Rack(module=2.0)
+        pinion = SpurGear(teeth=20, module=2.0)
+        f = rack.force_report(pinion, power_kw=1.0, speed_rpm=600.0)
+        assert f["torque"] is None
+        assert f["Ft"] == pytest.approx(
+            pinion.tangential_force(1.0, 600.0))
+        assert f["Fr"] == pytest.approx(f["Ft"] * math.tan(math.radians(20)))

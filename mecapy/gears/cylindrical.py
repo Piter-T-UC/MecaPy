@@ -341,41 +341,14 @@ class CylindricalGear(Gear):
     # Forces and rating
     # ------------------------------------------------------------------
 
-    def tangential_force(self, power_kw, speed_rpm):
-        """
-        Tangential force at the pitch circle for a transmitted power.
-
-        Args:
-            power_kw (float): Transmitted power in kW.
-            speed_rpm (float): Rotational speed of this gear in rpm.
-
-        Returns:
-            float: Tangential force Ft in N.
-
-        Raises:
-            ValueError: If power or speed is not strictly positive.
-        """
-        if power_kw <= 0:
-            raise ValueError("Power must be strictly positive")
-        if speed_rpm <= 0:
-            raise ValueError("Speed must be strictly positive")
-        v = self.pitch_line_velocity(speed_rpm)
-        return 1000 * power_kw / v
-
-    def pitch_line_velocity(self, speed_rpm):
-        """
-        Pitch-line velocity at a given rotational speed.
-
-        Args:
-            speed_rpm (float): Rotational speed in rpm.
-
-        Returns:
-            float: Pitch-line velocity in m/s.
-        """
-        return math.pi * self.pitch_diameter * speed_rpm / 60000.0
-
     def radial_force(self, tangential_force):
-        """float: Radial (separating) force in N: Ft * tan(phi_t)."""
+        """float: Radial (separating) force in N: Ft * tan(phi_t).
+
+        Uses the transverse pressure angle, overriding
+        :meth:`Gear.radial_force` (they coincide for a spur gear).
+        ``tangential_force`` and :meth:`pitch_line_velocity` are
+        inherited unchanged from :class:`~mecapy.gears.gear.Gear`.
+        """
         phi_t = math.radians(self.transverse_pressure_angle)
         return tangential_force * math.tan(phi_t)
 

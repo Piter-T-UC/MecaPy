@@ -194,6 +194,139 @@ class Worm(MechaElement):
         k = WORM_WEAR_K[wheel_material_key]
         return k * wheel.pitch_diameter * wheel.face_width
 
+    def _resolve_forces(self, power_kw, speed_rpm, wheel,
+                        friction_coefficient=0.05):
+        """
+        Resolve the worm-drive tooth force into its components.
+
+        Simplified educational resolution (Shigley worm gearing, worm
+        driving), not an AGMA 6034 rating. From the worm tangential
+        (driving) load Wt_worm the resultant W and the three orthogonal
+        components are found with lead angle ``lambda``, normal pressure
+        angle ``phi_n`` and friction ``f``:
+
+            Wt_worm = W (cos(phi_n) sin(lambda) + f cos(lambda))
+            Wt_wheel = W (cos(phi_n) cos(lambda) - f sin(lambda))
+            Wr = W sin(phi_n)   (separating, shared by both members)
+
+        The worm tangential equals the wheel axial and vice versa.
+
+        Returns:
+            dict: ``Wt_worm``, ``Wt_wheel``, ``Wr`` (N), ``W`` (N, the
+            resultant), ``v_worm`` (m/s) and ``efficiency``.
+
+        Raises:
+            ValueError: If power or speed is not strictly positive, the
+                pair cannot mesh, or the friction coefficient is
+                negative.
+        """
+        from .transmission import _check_mesh
+
+        _check_mesh(self, wheel)
+        if power_kw <= 0:
+            raise ValueError("Power must be strictly positive")
+        if speed_rpm <= 0:
+            raise ValueError("Speed must be strictly positive")
+        if friction_coefficient < 0:
+            raise ValueError("Friction coefficient must be non-negative")
+        phi_n = math.radians(self.pressure_angle)
+        lam = math.radians(self.lead_angle)
+        v_worm = math.pi * self.pitch_diameter * speed_rpm / 60000.0
+        wt_worm = 1000 * power_kw / v_worm
+        w = wt_worm / (math.cos(phi_n) * math.sin(lam)
+                       + friction_coefficient * math.cos(lam))
+        wt_wheel = w * (math.cos(phi_n) * math.cos(lam)
+                        - friction_coefficient * math.sin(lam))
+        wr = w * math.sin(phi_n)
+        return {
+            "Wt_worm": wt_worm,
+            "Wt_wheel": wt_wheel,
+            "Wr": wr,
+            "W": w,
+            "v_worm": v_worm,
+            "efficiency": self.efficiency(friction_coefficient),
+        }
+
+    def force_report(self, power_kw, speed_rpm, wheel,
+                     friction_coefficient=0.05):
+        """
+        Forces and moments on the worm (the driving screw member).
+
+        The tangential force drives the worm rotation; the axial thrust
+        equals the wheel tangential (output) force, and the separating
+        force is shared with the wheel. Simplified educational
+        resolution (see :meth:`_resolve_forces`), not an AGMA 6034
+        rating.
+
+        Args:
+            power_kw (float): Transmitted power in kW.
+            speed_rpm (float): Worm rotational speed in rpm.
+            wheel (WormWheel): Mating worm wheel.
+            friction_coefficient (float): Sliding friction coefficient
+                (default 0.05).
+
+        Returns:
+            dict: With keys ``Ft``, ``Fr``, ``Fa`` (N, referred to the
+            worm), ``torque`` and ``moment`` (N*m), ``pitch_line_velocity``
+            (m/s), plus ``wheel_tangential`` (N) and ``efficiency``.
+
+        Raises:
+            ValueError: For non-physical inputs or an incompatible pair.
+        """
+        c = self._resolve_forces(power_kw, speed_rpm, wheel,
+                                 friction_coefficient)
+        r = self.pitch_diameter / 2.0  # mm
+        return {
+            "Ft": c["Wt_worm"],
+            "Fr": c["Wr"],
+            "Fa": c["Wt_wheel"],
+            "torque": c["Wt_worm"] * r / 1000.0,
+            "moment": c["Wt_wheel"] * r / 1000.0,
+            "pitch_line_velocity": c["v_worm"],
+            "wheel_tangential": c["Wt_wheel"],
+            "efficiency": c["efficiency"],
+        }
+
+    def describe_forces(self, power_kw, speed_rpm, wheel,
+                        friction_coefficient=0.05):
+        """
+        Multi-line report of the worm-drive forces (worm and wheel).
+
+        Formatted like :meth:`Gear.describe_forces`; shows both the
+        worm-side components and the resulting wheel tangential/axial
+        (they are the swapped components of the same tooth force).
+
+        Args:
+            power_kw (float): Transmitted power in kW.
+            speed_rpm (float): Worm rotational speed in rpm.
+            wheel (WormWheel): Mating worm wheel.
+            friction_coefficient (float): Sliding friction coefficient.
+
+        Returns:
+            str: Formatted force/moment report.
+        """
+        f = self.force_report(power_kw, speed_rpm, wheel,
+                              friction_coefficient)
+        header = "Worm drive forces and moments"
+        if self.name:
+            header += f" '{self.name}'"
+        return "\n".join([
+            header,
+            "=" * 40,
+            f"transmitted power (P) = {power_kw:.3f} kW",
+            f"worm speed (n) = {speed_rpm:.1f} rpm",
+            f"worm pitch-line velocity (v) = "
+            f"{f['pitch_line_velocity']:.3f} m/s",
+            f"efficiency (eta) = {f['efficiency']:.3f}",
+            f"worm tangential force (Ft) = {f['Ft']:.1f} N",
+            f"separating force (Fr) = {f['Fr']:.1f} N",
+            f"worm axial force (Fa) = {f['Fa']:.1f} N",
+            f"wheel tangential force (Wt_wheel) = "
+            f"{f['wheel_tangential']:.1f} N",
+            f"worm torque (T) = {f['torque']:.3f} N*m",
+            f"worm axial moment (Ma) = {f['moment']:.3f} N*m",
+        ])
+
     def __repr__(self):
         return (
             f"Worm(starts={self.starts}, module={self.module}, "
@@ -244,3 +377,83 @@ class WormWheel(Gear):
         if face_width is not None and face_width <= 0:
             raise ValueError("Face width must be strictly positive")
         self.face_width = face_width
+
+    def force_report(self, power_kw, speed_rpm, worm,
+                     friction_coefficient=0.05):
+        """
+        Forces and moments on the worm wheel (the driven member).
+
+        Delegates to :meth:`Worm._resolve_forces` and presents the
+        wheel-side components: the tangential (output) force equals the
+        worm axial thrust, the wheel axial thrust equals the worm
+        tangential (driving) force, and the separating force is shared.
+        Overrides the plain :meth:`Gear.force_report` (a worm wheel
+        meshes only with a worm, so the generic spur-style resolution
+        does not apply). Simplified educational resolution, not an
+        AGMA 6034 rating.
+
+        Args:
+            power_kw (float): Transmitted power in kW.
+            speed_rpm (float): Worm-wheel rotational speed in rpm.
+            worm (Worm): Mating worm.
+            friction_coefficient (float): Sliding friction coefficient
+                (default 0.05).
+
+        Returns:
+            dict: With keys ``Ft``, ``Fr``, ``Fa`` (N, referred to the
+            wheel), ``torque`` and ``moment`` (N*m),
+            ``pitch_line_velocity`` (m/s) and ``efficiency``.
+
+        Raises:
+            ValueError: For non-physical inputs or an incompatible pair.
+        """
+        worm_speed = speed_rpm * worm.ratio_with(self)
+        c = worm._resolve_forces(power_kw, worm_speed, self,
+                                 friction_coefficient)
+        r = self.pitch_diameter / 2.0  # mm
+        return {
+            "Ft": c["Wt_wheel"],
+            "Fr": c["Wr"],
+            "Fa": c["Wt_worm"],
+            "torque": c["Wt_wheel"] * r / 1000.0,
+            "moment": c["Wt_worm"] * r / 1000.0,
+            "pitch_line_velocity": (math.pi * self.pitch_diameter
+                                    * speed_rpm / 60000.0),
+            "efficiency": c["efficiency"],
+        }
+
+    def describe_forces(self, power_kw, speed_rpm, worm,
+                        friction_coefficient=0.05):
+        """
+        Multi-line report of the worm-wheel forces and moments.
+
+        Formatted like :meth:`Gear.describe_forces`, evaluated from the
+        mating worm's force resolution.
+
+        Args:
+            power_kw (float): Transmitted power in kW.
+            speed_rpm (float): Worm-wheel rotational speed in rpm.
+            worm (Worm): Mating worm.
+            friction_coefficient (float): Sliding friction coefficient.
+
+        Returns:
+            str: Formatted force/moment report.
+        """
+        f = self.force_report(power_kw, speed_rpm, worm,
+                              friction_coefficient)
+        header = f"{self.__class__.__name__} forces and moments"
+        if self.name:
+            header += f" '{self.name}'"
+        return "\n".join([
+            header,
+            "=" * 40,
+            f"transmitted power (P) = {power_kw:.3f} kW",
+            f"wheel speed (n) = {speed_rpm:.1f} rpm",
+            f"pitch-line velocity (v) = {f['pitch_line_velocity']:.3f} m/s",
+            f"efficiency (eta) = {f['efficiency']:.3f}",
+            f"tangential force (Ft) = {f['Ft']:.1f} N",
+            f"separating force (Fr) = {f['Fr']:.1f} N",
+            f"axial force (Fa) = {f['Fa']:.1f} N",
+            f"torque (T) = {f['torque']:.3f} N*m",
+            f"axial moment (Ma) = {f['moment']:.3f} N*m",
+        ])

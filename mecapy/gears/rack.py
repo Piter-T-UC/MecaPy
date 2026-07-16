@@ -116,6 +116,62 @@ class Rack(MechaElement):
         """
         return self.travel_per_pinion_rev(pinion) * speed_rpm / 60000.0
 
+    def force_report(self, pinion, power_kw, speed_rpm):
+        """
+        Forces the rack reacts from its driving pinion.
+
+        A rack is a linear (terminal) member: it carries a driving
+        (tangential) force equal to the pinion tangential force and a
+        separating force ``Ft * tan(alpha)``, but transmits no torque.
+
+        Args:
+            pinion (CylindricalGear): Driving pinion.
+            power_kw (float): Transmitted power in kW.
+            speed_rpm (float): Pinion rotational speed in rpm.
+
+        Returns:
+            dict: With keys ``Ft``, ``Fr`` (N), ``linear_velocity``
+            (m/s) and ``torque`` (always ``None`` — a rack has no
+            torque).
+
+        Raises:
+            ValueError: If power or speed is not strictly positive.
+        """
+        ft = pinion.tangential_force(power_kw, speed_rpm)
+        fr = ft * math.tan(math.radians(self.pressure_angle))
+        return {
+            "Ft": ft,
+            "Fr": fr,
+            "torque": None,
+            "linear_velocity": self.linear_velocity(pinion, speed_rpm),
+        }
+
+    def describe_forces(self, pinion, power_kw, speed_rpm):
+        """
+        Multi-line report of the forces the rack reacts.
+
+        Args:
+            pinion (CylindricalGear): Driving pinion.
+            power_kw (float): Transmitted power in kW.
+            speed_rpm (float): Pinion rotational speed in rpm.
+
+        Returns:
+            str: Formatted force report.
+        """
+        f = self.force_report(pinion, power_kw, speed_rpm)
+        header = "Rack forces"
+        if self.name:
+            header += f" '{self.name}'"
+        return "\n".join([
+            header,
+            "=" * 40,
+            f"transmitted power (P) = {power_kw:.3f} kW",
+            f"pinion speed (n) = {speed_rpm:.1f} rpm",
+            f"rack linear velocity (v) = {f['linear_velocity']:.3f} m/s",
+            f"driving force (Ft) = {f['Ft']:.1f} N",
+            f"separating force (Fr) = {f['Fr']:.1f} N",
+        ])
+
     def __repr__(self):
         return (
             f"Rack(module={self.module}, length={self.length}, "

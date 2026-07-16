@@ -181,6 +181,89 @@ class BevelGear(Gear):
         y = lewis_form_factor(self.virtual_teeth_with(mate, shaft_angle))
         return tangential_force / (self.face_width * m_mean * y)
 
+    def force_report(self, power_kw, speed_rpm, mate, shaft_angle=90.0):
+        """
+        Forces and moments this bevel gear generates, at the mean radius.
+
+        The tangential force acts at the mid-face (mean) radius; the
+        radial and axial components follow the standard straight-bevel
+        resolution (Shigley), which splits ``Ft * tan(alpha)`` between
+        the radial and axial directions by the pitch cone angle:
+        ``Fr = Ft tan(alpha) cos(gamma)``, ``Fa = Ft tan(alpha)
+        sin(gamma)``. Because the geometry depends on the mate and shaft
+        angle, they are required (like the other bevel ``*_with``
+        methods).
+
+        Args:
+            power_kw (float): Transmitted power in kW.
+            speed_rpm (float): Rotational speed of this gear in rpm.
+            mate (BevelGear): Mating bevel gear.
+            shaft_angle (float): Angle between shafts in degrees
+                (default 90).
+
+        Returns:
+            dict: With keys ``Ft``, ``Fr``, ``Fa`` (N), ``torque`` and
+            ``moment`` (N*m) and ``pitch_line_velocity`` (m/s, at the
+            mean radius).
+
+        Raises:
+            ValueError: If power or speed is not strictly positive, the
+                gears cannot mesh, or ``face_width`` is not set.
+        """
+        if power_kw <= 0:
+            raise ValueError("Power must be strictly positive")
+        if speed_rpm <= 0:
+            raise ValueError("Speed must be strictly positive")
+        r_mean = self.mean_radius_with(mate, shaft_angle)  # mm
+        gamma = math.radians(self.pitch_cone_angle_with(mate, shaft_angle))
+        phi = math.radians(self.pressure_angle)
+        v = 2 * math.pi * speed_rpm / 60.0 * r_mean / 1000.0  # m/s
+        ft = 1000 * power_kw / v
+        fr = ft * math.tan(phi) * math.cos(gamma)
+        fa = ft * math.tan(phi) * math.sin(gamma)
+        return {
+            "Ft": ft,
+            "Fr": fr,
+            "Fa": fa,
+            "torque": ft * r_mean / 1000.0,
+            "moment": fa * r_mean / 1000.0,
+            "pitch_line_velocity": v,
+        }
+
+    def describe_forces(self, power_kw, speed_rpm, mate, shaft_angle=90.0):
+        """
+        Multi-line report of the forces and moments (bevel, mean radius).
+
+        Formatted like :meth:`Gear.describe_forces` but evaluated at the
+        mean radius for the given mate and shaft angle.
+
+        Args:
+            power_kw (float): Transmitted power in kW.
+            speed_rpm (float): Rotational speed of this gear in rpm.
+            mate (BevelGear): Mating bevel gear.
+            shaft_angle (float): Angle between shafts in degrees.
+
+        Returns:
+            str: Formatted force/moment report.
+        """
+        f = self.force_report(power_kw, speed_rpm, mate, shaft_angle)
+        header = f"{self.__class__.__name__} forces and moments"
+        if self.name:
+            header += f" '{self.name}'"
+        return "\n".join([
+            header,
+            "=" * 40,
+            f"transmitted power (P) = {power_kw:.3f} kW",
+            f"rotational speed (n) = {speed_rpm:.1f} rpm",
+            f"pitch-line velocity at mean radius (v) = "
+            f"{f['pitch_line_velocity']:.3f} m/s",
+            f"tangential force (Ft) = {f['Ft']:.1f} N",
+            f"radial force (Fr) = {f['Fr']:.1f} N",
+            f"axial force (Fa) = {f['Fa']:.1f} N",
+            f"torque (T) = {f['torque']:.3f} N*m",
+            f"axial moment (Ma) = {f['moment']:.3f} N*m",
+        ])
+
     def __repr__(self):
         return (
             f"BevelGear(teeth={self.teeth}, module={self.module}, "

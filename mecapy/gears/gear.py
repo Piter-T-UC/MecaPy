@@ -223,6 +223,123 @@ class Gear(MechaElement):
         """float: Root radius in mm (root_diameter / 2)."""
         return self.root_diameter / 2
 
+    # ------------------------------------------------------------------
+    # Forces and moments
+    # ------------------------------------------------------------------
+
+    def pitch_line_velocity(self, speed_rpm):
+        """
+        Pitch-line velocity at a given rotational speed.
+
+        Args:
+            speed_rpm (float): Rotational speed in rpm.
+
+        Returns:
+            float: Pitch-line velocity in m/s.
+        """
+        return math.pi * self.pitch_diameter * speed_rpm / 60000.0
+
+    def tangential_force(self, power_kw, speed_rpm):
+        """
+        Tangential force at the pitch circle for a transmitted power.
+
+        Args:
+            power_kw (float): Transmitted power in kW.
+            speed_rpm (float): Rotational speed of this gear in rpm.
+
+        Returns:
+            float: Tangential force Ft in N.
+
+        Raises:
+            ValueError: If power or speed is not strictly positive.
+        """
+        if power_kw <= 0:
+            raise ValueError("Power must be strictly positive")
+        if speed_rpm <= 0:
+            raise ValueError("Speed must be strictly positive")
+        v = self.pitch_line_velocity(speed_rpm)
+        return 1000 * power_kw / v
+
+    def radial_force(self, tangential_force):
+        """float: Radial (separating) force in N: Ft * tan(alpha)."""
+        return tangential_force * math.tan(math.radians(self.pressure_angle))
+
+    def axial_force(self, tangential_force):
+        """float: Axial (thrust) force in N. Zero for a plain gear (no
+        helix)."""
+        return 0.0
+
+    def force_report(self, power_kw, speed_rpm):
+        """
+        Forces and moments this gear generates at a working point.
+
+        Collects the tangential, radial (separating) and axial (thrust)
+        tooth forces together with the transmitted torque and the
+        overturning moment produced by the thrust. Reuses
+        :meth:`tangential_force`, :meth:`radial_force` and
+        :meth:`axial_force`, so subclasses that override those
+        (helical thrust, herringbone cancellation, ...) are reflected
+        automatically.
+
+        Args:
+            power_kw (float): Transmitted power in kW.
+            speed_rpm (float): Rotational speed of this gear in rpm.
+
+        Returns:
+            dict: With keys ``Ft``, ``Fr``, ``Fa`` (forces in N),
+            ``torque`` and ``moment`` (in N*m) and
+            ``pitch_line_velocity`` (in m/s). ``torque`` is Ft times the
+            pitch radius; ``moment`` is the thrust Fa times the pitch
+            radius (0 without an axial force).
+
+        Raises:
+            ValueError: If power or speed is not strictly positive.
+        """
+        ft = self.tangential_force(power_kw, speed_rpm)
+        fr = self.radial_force(ft)
+        fa = self.axial_force(ft)
+        r = self.pitch_radius  # mm
+        return {
+            "Ft": ft,
+            "Fr": fr,
+            "Fa": fa,
+            "torque": ft * r / 1000.0,
+            "moment": fa * r / 1000.0,
+            "pitch_line_velocity": self.pitch_line_velocity(speed_rpm),
+        }
+
+    def describe_forces(self, power_kw, speed_rpm):
+        """
+        Multi-line report of the forces and moments this gear generates.
+
+        Formatted like :meth:`describe` (``label (symbol) = value unit``
+        lines) from :meth:`force_report`. The string is returned, not
+        printed.
+
+        Args:
+            power_kw (float): Transmitted power in kW.
+            speed_rpm (float): Rotational speed of this gear in rpm.
+
+        Returns:
+            str: Formatted force/moment report.
+        """
+        f = self.force_report(power_kw, speed_rpm)
+        header = f"{self.__class__.__name__} forces and moments"
+        if self.name:
+            header += f" '{self.name}'"
+        return "\n".join([
+            header,
+            "=" * 40,
+            f"transmitted power (P) = {power_kw:.3f} kW",
+            f"rotational speed (n) = {speed_rpm:.1f} rpm",
+            f"pitch-line velocity (v) = {f['pitch_line_velocity']:.3f} m/s",
+            f"tangential force (Ft) = {f['Ft']:.1f} N",
+            f"radial force (Fr) = {f['Fr']:.1f} N",
+            f"axial force (Fa) = {f['Fa']:.1f} N",
+            f"torque (T) = {f['torque']:.3f} N*m",
+            f"axial moment (Ma) = {f['moment']:.3f} N*m",
+        ])
+
     def describe(self):
         """
         Multi-line summary of every geometry parameter.
