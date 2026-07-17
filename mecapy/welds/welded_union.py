@@ -264,6 +264,62 @@ class WeldedUnion(MechaElement):
             result[i] = w.allowable_stress / peak if peak > 0 else float("inf")
         return result
 
+    # ---- Sizing ----
+
+    def required_size(self, n=24, safety_factor=1.0, apply=False):
+        """
+        Weld size (mm) needed to carry the applied loads.
+
+        Uses the "weld as a line" method: the force per unit length at
+        any point depends only on the group's line geometry — total
+        length (perimeter), unit second moments (Iux, Iuy) and unit
+        polar moment Ju — and the applied forces and moments, never on
+        the throat. The required throat is therefore closed-form:
+
+            q_eq = sqrt(fz^2 + 3*(fx^2 + fy^2))   [N/mm]
+            throat = safety_factor * max(q_eq) / allowable
+
+        evaluated per weld against its own electrode allowable
+        (0.30 * FEXX), converting throat to leg size for fillet welds
+        (size = throat / 0.707). The group size is the largest per-weld
+        requirement. Works whether or not sizes are currently set.
+
+        Args:
+            n (int): Sample points per weld (>= 2).
+            safety_factor (float): Design factor against the AISC
+                allowable (default 1.0, i.e. stress = allowable).
+            apply (bool): If True, set the computed size on every weld
+                via :meth:`set_size`.
+
+        Returns:
+            float: Required weld size in mm (fillet leg or butt
+            thickness, whichever governs).
+
+        Raises:
+            ValueError: If ``safety_factor`` is not strictly positive or
+                the group carries no load (required size would be zero).
+        """
+        if safety_factor <= 0:
+            raise ValueError("safety_factor must be strictly positive")
+        from .weld import FILLET_THROAT_FACTOR
+
+        cx, cy = self.centroid
+        best = 0.0
+        for w in self.welds:
+            q_max = 0.0
+            for x, y in w.sample_points(n):
+                fx, fy, fz = self._load_per_length(x - cx, y - cy)
+                q_eq = sqrt(fz ** 2 + 3 * (fx ** 2 + fy ** 2))
+                q_max = max(q_max, q_eq)
+            throat = safety_factor * q_max / w.allowable_stress
+            size = throat / FILLET_THROAT_FACTOR if w.weld_type == "fillet" else throat
+            best = max(best, size)
+        if best == 0:
+            raise ValueError("No load applied: required weld size is zero")
+        if apply:
+            self.set_size(best)
+        return best
+
     # ---- Visualization ----
 
     def plot_distribution(self, n=48, show=True, ax=None):
@@ -311,7 +367,7 @@ class WeldedUnion(MechaElement):
         else:
             fig = ax.figure
 
-        lc = LineCollection(segments, cmap="viridis", linewidth=5, zorder=3)
+        lc = LineCollection(segments, cmap="coolwarm", linewidth=5, zorder=3)
         lc.set_array(seg_values)
         ax.add_collection(lc)
         cbar = fig.colorbar(lc, ax=ax)

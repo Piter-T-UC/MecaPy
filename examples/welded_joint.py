@@ -149,6 +149,10 @@ def main():
     print(f"New max stress: {union.max_stress(n=12)[2]:.1f} MPa")
     print(f"New safety factors: {union.safety_factors(n=12)}")
 
+    # Or solve directly for the size that gives a target safety factor
+    required = union.required_size(n=12, safety_factor=2.0)
+    print(f"\nRequired size for SF = 2.0: {required:.2f} mm")
+
     # ---- Complex weld group example ----
     print("\n" + "=" * 70)
     print("--- Complex Weld Group: Box Joint ---\n")

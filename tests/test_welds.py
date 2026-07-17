@@ -193,6 +193,50 @@ class TestWeldedUnion:
         assert u.size == 10.0
 
 
+class TestRequiredSize:
+    """Automatic weld sizing from the line geometry and loads."""
+
+    def test_pure_shear_closed_form(self):
+        """throat = sqrt(3)*(F/L)/allowable; size = throat/0.707."""
+        weld = Weld(WeldLine((0, 0), (0, 100)), electrode="E70")
+        u = WeldedUnion([weld], forces=(0, -6000, 0))
+        allowable = 0.30 * 482.0
+        throat = sqrt(3) * (6000 / 100) / allowable
+        assert isclose(u.required_size(), throat / 0.707, rel_tol=1e-9)
+
+    def test_butt_weld_size_is_throat(self):
+        """A butt weld needs no 0.707 conversion."""
+        weld = Weld(WeldLine((0, 0), (0, 100)), weld_type="butt", electrode="E70")
+        u = WeldedUnion([weld], forces=(0, -6000, 0))
+        allowable = 0.30 * 482.0
+        throat = sqrt(3) * (6000 / 100) / allowable
+        assert isclose(u.required_size(), throat, rel_tol=1e-9)
+
+    def test_apply_reaches_target_safety_factor(self):
+        """apply=True sets the size; resulting min SF ~= safety_factor."""
+        u = WeldedUnion(two_vertical_lines(), forces=(5000, -8000, 3000),
+                        moments=(0, 0, 400000))
+        size = u.required_size(n=24, safety_factor=2.0, apply=True)
+        assert u.size == size
+        assert min(u.safety_factors(n=24).values()) == pytest.approx(2.0, rel=1e-9)
+
+    def test_works_without_preset_size(self):
+        """Sizing needs no size on the welds beforehand."""
+        welds = [Weld(WeldLine((0, 0), (0, 100))),
+                 Weld(WeldLine((50, 0), (50, 100)))]
+        u = WeldedUnion(welds, moments=(0, 0, 500000))
+        assert u.required_size() > 0
+
+    def test_no_load_and_bad_safety_factor_raise(self):
+        """Zero load or non-positive safety factor raise."""
+        u = WeldedUnion(two_vertical_lines())
+        with pytest.raises(ValueError):
+            u.required_size()
+        with pytest.raises(ValueError):
+            WeldedUnion(two_vertical_lines(),
+                        forces=(0, -6000, 0)).required_size(safety_factor=0)
+
+
 class TestWeldPlot:
     """Smoke test for the matplotlib plot."""
 

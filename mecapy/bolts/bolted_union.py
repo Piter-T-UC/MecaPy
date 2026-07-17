@@ -119,8 +119,11 @@ class BoltedUnion(MechaElement):
 
         Returns:
             dict: ``{bolt_number: {"shear": (Fsx, Fsy),
-            "shear_magnitude": float, "axial": float}}`` with forces
-            in N.
+            "shear_magnitude": float, "axial": float,
+            "shear_direct": (Vx, Vy), "shear_torsion": (Tx, Ty)}}``
+            with forces in N. ``shear`` is the component-wise sum of
+            ``shear_direct`` (from Fx, Fy) and ``shear_torsion``
+            (from Mz).
 
         Raises:
             ValueError: If a torsion/bending moment is non-zero but the
@@ -144,11 +147,16 @@ class BoltedUnion(MechaElement):
 
         result = {}
         for number, dx, dy in rel:
-            fsx = fx / n
-            fsy = fy / n
+            vx = fx / n
+            vy = fy / n
             if mz != 0:
-                fsx += -mz * dy / sum_r2
-                fsy += mz * dx / sum_r2
+                tx = -mz * dy / sum_r2
+                ty = mz * dx / sum_r2
+            else:
+                tx = 0.0
+                ty = 0.0
+            fsx = vx + tx
+            fsy = vy + ty
             axial = fz / n
             if mx != 0:
                 axial += mx * dy / sum_dy2
@@ -158,6 +166,8 @@ class BoltedUnion(MechaElement):
                 "shear": (fsx, fsy),
                 "shear_magnitude": sqrt(fsx ** 2 + fsy ** 2),
                 "axial": axial,
+                "shear_direct": (vx, vy),
+                "shear_torsion": (tx, ty),
             }
         return result
 
@@ -209,14 +219,18 @@ class BoltedUnion(MechaElement):
         """
         Plot how the applied loads distribute over the bolts.
 
-        Each bolt is drawn at its position; its shear force is drawn as
-        an arrow pointing in the shear direction, and its axial force is
-        annotated as a magnitude next to the bolt. The group centroid is
-        marked with a cross.
+        Each bolt is drawn at its position with the shear broken into
+        axis-aligned components, each annotated with its signed
+        magnitude: direct shear (Vx, Vy from Fx, Fy) in blue, torsion
+        shear (Tx, Ty from Mz) in orange, and the resultant as a thin
+        dashed gray arrow. The axial load is annotated as a signed
+        magnitude next to the bolt. The group centroid is marked with a
+        cross.
 
         Args:
-            scale (float): Arrow scale in mm per N. If None, the longest
-                shear arrow is auto-scaled to about 20% of the plot span.
+            scale (float): Arrow scale in mm per N. If None, the largest
+                shear component is auto-scaled to about 20% of the plot
+                span.
             show (bool): Call ``plt.show()`` (default: True). Pass False
                 when embedding or testing.
             ax (matplotlib.axes.Axes): Axes to draw on. If None, a new
@@ -247,33 +261,90 @@ class BoltedUnion(MechaElement):
 
         span = max(max(xs) - min(xs), max(ys) - min(ys)) or 1.0
         if scale is None:
-            max_shear = max(entry["shear_magnitude"] for entry in forces.values())
-            scale = 0.2 * span / max_shear if max_shear > 0 else 1.0
+            max_component = max(
+                (abs(c) for entry in forces.values()
+                 for pair in (entry["shear_direct"], entry["shear_torsion"])
+                 for c in pair),
+                default=0.0,
+            )
+            scale = 0.2 * span / max_component if max_component > 0 else 1.0
 
         ax.scatter(xs, ys, s=80, color="#374151", zorder=3, label="Bolts")
         x_bar, y_bar = self.centroid
         ax.plot(x_bar, y_bar, "+", color="#6b7280", markersize=12,
                 markeredgewidth=2, zorder=2, label="Centroid")
 
+        direct_color = "#2563eb"
+        torsion_color = "#ea580c"
         offset = 0.03 * span
+
+        def draw_component(x, y, cx, cy, label, value, color,
+                           base_shift, label_shift, ha):
+            """Arrow for one axis-aligned shear component with its signed value.
+
+            base_shift nudges the arrow origin and label_shift the text so
+            direct and torsion components along the same axis stay legible.
+            """
+            if value == 0:
+                return
+            base = (x + base_shift[0], y + base_shift[1])
+            tip = (base[0] + cx * scale, base[1] + cy * scale)
+            ax.annotate(
+                "", xy=tip, xytext=base,
+                arrowprops={"arrowstyle": "-|>", "color": color,
+                            "linewidth": 2, "mutation_scale": 14},
+                zorder=4,
+            )
+            ax.annotate(
+                f"{label} = {value:+.0f} N",
+                xy=tip, xytext=(tip[0] + label_shift[0], tip[1] + label_shift[1]),
+                fontsize=8, color=color, zorder=5, ha=ha, va="center",
+            )
+
         for row in self.positions:
             number, x, y = row
             entry = forces[number]
+            vx, vy = entry["shear_direct"]
+            tx, ty = entry["shear_torsion"]
+            # Direct shear on the axes; torsion nudged off-axis so both
+            # arrows and labels stay visible when they share a direction.
+            # Horizontal labels go past the arrow tip on the side it
+            # points to, so they never run back over the bolt text.
+            vx_side = 1 if vx >= 0 else -1
+            tx_side = 1 if tx >= 0 else -1
+            draw_component(x, y, vx, 0, "Vx", vx, direct_color,
+                           (0, 0.5 * offset),
+                           (vx_side * 0.3 * offset, 0.5 * offset),
+                           "left" if vx_side > 0 else "right")
+            draw_component(x, y, 0, vy, "Vy", vy, direct_color,
+                           (0.5 * offset, 0), (0.5 * offset, 0.3 * offset), "left")
+            draw_component(x, y, tx, 0, "Tx", tx, torsion_color,
+                           (0, -0.5 * offset),
+                           (tx_side * 0.3 * offset, -0.5 * offset),
+                           "left" if tx_side > 0 else "right")
+            draw_component(x, y, 0, ty, "Ty", ty, torsion_color,
+                           (-0.5 * offset, 0), (-0.5 * offset, 0.3 * offset), "right")
             fsx, fsy = entry["shear"]
             if entry["shear_magnitude"] > 0:
                 ax.annotate(
                     "", xy=(x + fsx * scale, y + fsy * scale), xytext=(x, y),
-                    arrowprops={"arrowstyle": "-|>", "color": "#2563eb",
-                                "linewidth": 2, "mutation_scale": 16},
-                    zorder=4,
+                    arrowprops={"arrowstyle": "-|>", "color": "#9ca3af",
+                                "linewidth": 1, "linestyle": "--",
+                                "mutation_scale": 10},
+                    zorder=3,
                 )
             ax.annotate(
-                f"#{number}\nN = {entry['axial']:.0f} N",
-                xy=(x, y), xytext=(x + offset, y + offset),
+                f"#{number}\nN = {entry['axial']:+.0f} N",
+                xy=(x, y), xytext=(x - 2.2 * offset, y - 2.2 * offset),
                 fontsize=9, color="#374151", zorder=5,
             )
 
-        ax.plot([], [], color="#2563eb", linewidth=2, label="Shear force")
+        ax.plot([], [], color=direct_color, linewidth=2,
+                label="Direct shear (Vx, Vy)")
+        ax.plot([], [], color=torsion_color, linewidth=2,
+                label="Torsion shear (Tx, Ty)")
+        ax.plot([], [], color="#9ca3af", linewidth=1, linestyle="--",
+                label="Resultant shear")
         ax.set_xlabel("x [mm]")
         ax.set_ylabel("y [mm]")
         ax.set_title("Bolted union: force distribution")

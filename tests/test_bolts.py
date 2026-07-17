@@ -113,6 +113,36 @@ class TestBoltedUnion:
         fsx, fsy = forces[1]["shear"]
         assert fsx > 0 and fsy < 0
 
+    def test_shear_component_breakdown(self):
+        """shear_direct + shear_torsion sum to shear, with correct signs."""
+        mz = 1e6
+        union = BoltedUnion(
+            Bolt("M10", 50.0), square_pattern(),
+            forces=(4000.0, 0.0, 0.0), moments=(0.0, 0.0, mz),
+        )
+        forces = union.bolt_forces()
+        sum_r2 = 4 * (sqrt(2) * 50.0) ** 2
+        for number, entry in forces.items():
+            vx, vy = entry["shear_direct"]
+            tx, ty = entry["shear_torsion"]
+            assert isclose(vx, 1000.0)
+            assert isclose(vy, 0.0, abs_tol=1e-12)
+            assert isclose(vx + tx, entry["shear"][0])
+            assert isclose(vy + ty, entry["shear"][1])
+        # Bolt 1 at (-50, -50) relative: (tx, ty) = (-Mz*dy, Mz*dx)/sum_r2
+        tx, ty = forces[1]["shear_torsion"]
+        assert isclose(tx, mz * 50.0 / sum_r2)
+        assert isclose(ty, -mz * 50.0 / sum_r2)
+
+    def test_shear_torsion_zero_without_mz(self):
+        """No torsion moment -> torsion components are exactly (0, 0)."""
+        union = BoltedUnion(
+            Bolt("M10", 50.0), square_pattern(), forces=(4000.0, -2000.0, 0.0)
+        )
+        for entry in union.bolt_forces().values():
+            assert entry["shear_torsion"] == (0.0, 0.0)
+            assert entry["shear"] == entry["shear_direct"]
+
     def test_direct_axial(self):
         """Pure axial force splits equally."""
         union = BoltedUnion(Bolt("M10", 50.0), square_pattern(), forces=(0.0, 0.0, 8000.0))
