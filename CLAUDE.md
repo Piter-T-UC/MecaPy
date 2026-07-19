@@ -92,6 +92,9 @@ MechaElement                              # material_properties, calculate_stres
 ├── CaliperDiscBrake (brakes/disc.py)     # annular-sector pads, both wear theories
 ├── FlangeCoupling (couplings/)           # rigid: bolt/key/flange checks, torque_capacity()
 ├── FlexibleCoupling (couplings/)         # catalog-style: torque/speed/misalignment ratings
+├── FlatBelt (belts/flat.py)              # capstan e^(mu*phi) drive, tension/power round-trip
+│   └── VBelt (belts/vbelt.py)            # groove wedging, 1/sin(groove_angle/2) friction amplification
+├── RollerChain (chains/roller.py)        # ANSI chain kinematics, tensile SF, H1/H2 rated power
 └── Weld (welds/)                         # weld bead stresses & material
     └── WeldedUnion (welds/)              # weld group: combined loading, sizing, plots
 ```
@@ -268,6 +271,43 @@ through `mecapy/materials.py` (`get_material_properties`, `get_available_materia
 - **`FlexibleCoupling`** — catalog-style ratings: torque/speed safety factors,
   `check_misalignment()` / `validate_misalignment()` (angular/parallel/axial),
   torsional windup (needs `torsional_stiffness`)
+
+### Belts (`mecapy/belts/`)
+**Purpose:** flexible mechanical elements — flat and V-belt drives (Shigley Ch. 17).
+mm / N / W / MPa convention; belt/pulley speed in m/s, mass per length in kg/m.
+
+- **`FlatBelt`** — open or crossed drive around two pulleys; wrap angles (Eq. 17-1),
+  belt length (Eq. 17-2/17-3), capstan tension ratio `e^(mu*phi)` over the governing
+  (smaller) wrap angle, centrifugal tension `Fc = m'V^2`, `tensions_for_power()` /
+  `power()` round-trip at full capstan development, `initial_tension()` (Eq. 17-9)
+  - mu/density/allowable_stress resolution mirrors `BandBrake`: explicit arg wins,
+    then `belt_material` table row (`belts/belt_data.py`), then a friction default
+  - Never define a method named `safety_factor` on these classes (would shadow the
+    inherited Pa-based `MechaElement.safety_factor`); use `belt_stress_safety_factor()`
+    and `power_safety_factor()` instead
+- **`VBelt(FlatBelt)`** — groove wedging multiplies the effective friction (same move
+  as `ConeClutch` on a flat disc): `effective_friction` = `mu/sin(groove_angle/2)` when
+  `mu` is given, else Shigley's tabulated `V_BELT_EFFECTIVE_MU` (0.5123, Eq. 17-24)
+  directly. `pitch_length()` / `center_distance_for_pitch_length()` round-trip
+  (Eq. 17-16a/b), `designation` (e.g. "B90"), `belts_required()` (per-belt power
+  supplied by the caller; full Kb/Kc/K1/K2 rating tables are not implemented)
+- **`belt_data.py`** — `FLAT_BELT_MATERIALS` / `V_BELT_SECTIONS` tables + accessors,
+  mirroring the `clutches/friction_data.py` pattern
+
+### Chains (`mecapy/chains/`)
+**Purpose:** ANSI roller chain drives (Shigley Ch. 17, Sec. 17-4). Same mm/N/W
+convention; chain speed in m/s.
+
+- **`RollerChain`** — sprocket pitch diameters (Eq. 17-28), chordal speed variation,
+  chain length / center-distance round-trip (Eq. 17-34/17-35), `working_tension()` and
+  `tensile_safety_factor()`, `rated_power()` = min(H1, H2) from the empirical
+  pre-extreme-horsepower equations (Eq. 17-32 link-plate fatigue, Eq. 17-33
+  roller-bushing wear — computed internally in inches/hp, converted once at the
+  boundary with `utils.converters.hp_to_kw`); service factors and lubrication regime
+  selection are not modeled
+- **`chain_data.py`** — `ANSI_ROLLER_CHAINS` table (pitch, width, min tensile strength,
+  mass per length, the Eq. 17-33 `kr` constant) + `STRAND_FACTORS` (Table 17-22) +
+  `get_chain()` accessor
 
 ### Flywheels (`mecapy/wheels/flywheel.py`)
 **Purpose:** rotational energy storage (Shigley Sec. 16-12). **SI units** (m, kg, Pa) —
