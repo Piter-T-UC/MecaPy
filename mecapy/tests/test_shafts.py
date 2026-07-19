@@ -3,10 +3,13 @@
 import math
 
 import pytest
+from sympy import Symbol
 
 from mecapy import MechaElement
 from mecapy.shafts import Shaft, SteppedShaft
 from mecapy.shafts.kt_data import get_kt_groove, get_kt_shoulder_fillet
+
+X = Symbol("x")
 
 
 class TestShaft:
@@ -36,11 +39,130 @@ class TestShaft:
         expected = torque * 10.0 / (math.pi * 20.0 ** 4 / 32)
         assert shaft.torsional_stress(torque) == pytest.approx(expected)
 
+    def test_second_moment(self):
+        """Bending second moment of area is pi * d^4 / 64 (= polar_moment / 2)."""
+        shaft = Shaft(diameter=20.0, length=500.0)
+        assert shaft.second_moment == pytest.approx(math.pi * 20.0 ** 4 / 64)
+        assert shaft.second_moment == pytest.approx(shaft.polar_moment / 2)
+
     def test_shaft_repr(self):
         """Test shaft string representation."""
         shaft = Shaft(diameter=30.0, length=1000.0, material="steel")
         assert "Shaft" in repr(shaft)
         assert "30.0mm" in repr(shaft)
+
+
+class TestShaftLoading:
+    """Test cases for Shaft.add_support / forces / shear_force / bending_moment."""
+
+    def test_add_support_chains_and_validates_range(self):
+        """add_support returns self and rejects an out-of-range location."""
+        shaft = Shaft(diameter=30.0, length=100.0)
+        assert shaft.add_support(0, "pin") is shaft
+        with pytest.raises(ValueError):
+            shaft.add_support(200.0, "pin")
+
+    def test_add_support_invalid_kind_rejected(self):
+        """Only pin/roller/fixed are accepted."""
+        shaft = Shaft(diameter=30.0, length=100.0)
+        with pytest.raises(ValueError):
+            shaft.add_support(0, "wobbly")
+
+    def test_forces_chains_and_validates_range(self):
+        """forces returns self and rejects an out-of-range loc."""
+        shaft = Shaft(diameter=30.0, length=100.0)
+        assert shaft.forces(loc=50.0, fy=-10.0) is shaft
+        with pytest.raises(ValueError):
+            shaft.forces(loc=200.0)
+
+    def test_forces_accumulates(self):
+        """Repeated forces() calls add separate load-point rows."""
+        shaft = Shaft(diameter=30.0, length=100.0)
+        shaft.forces(loc=20.0, fy=-10.0).forces(loc=80.0, mz=500.0)
+        assert shaft._point_loads == [
+            (20.0, 0, -10.0, 0, 0, 0, 0),
+            (80.0, 0, 0, 0, 0, 0, 500.0),
+        ]
+
+    def test_forces_stores_fx_and_mx_without_diagram(self):
+        """Axial force and torque are captured but don't feed a diagram yet (out of scope)."""
+        shaft = Shaft(diameter=30.0, length=100.0)
+        shaft.forces(loc=50.0, fx=500.0, mx=20000.0)
+        assert shaft._point_loads == [(50.0, 500.0, 0, 0, 20000.0, 0, 0)]
+
+    def test_fixed_support_cantilever_with_float_length_matches_hand_calc(self):
+        """Cantilever (fixed root), combined y+z tip load, non-integer length.
+
+        Regression test for the float-length bug found while building this:
+        sympy's solve_for_reaction_loads raises IndexError when the beam
+        length or a support/load location is a plain Python float instead
+        of an exact number — _build_beam works around it by converting
+        positions to sympy.Rational. 250.5 (not a whole number) exercises
+        that conversion; an integer-valued length wouldn't catch a
+        regression here.
+        """
+        length = 250.5
+        shaft = Shaft(diameter=25.0, length=length)
+        shaft.add_support(0, "fixed")
+        shaft.forces(loc=length, fy=-150.0, fz=80.0, fx=300.0, mx=15000.0)
+
+        root_moment_y = shaft.bending_moment()["y"].subs(X, 0)
+        root_moment_z = shaft.bending_moment()["z"].subs(X, 0)
+        tip_moment_y = shaft.bending_moment()["y"].subs(X, length)
+
+        assert abs(float(root_moment_y)) == pytest.approx(150.0 * length)
+        assert abs(float(root_moment_z)) == pytest.approx(80.0 * length)
+        assert float(tip_moment_y) == pytest.approx(0.0, abs=1e-6)
+        # fx/mx are captured for later use, not diagrammed (out of scope)
+        assert shaft._point_loads == [(length, 300.0, -150.0, 80.0, 15000.0, 0, 0)]
+
+    def test_bending_moment_y_plane_matches_hand_calc(self):
+        """Simply supported shaft, midspan point load in y: max moment = P*L/4."""
+        length = 400.0
+        shaft = Shaft(diameter=30.0, length=length)
+        shaft.add_support(0, "pin").add_support(length, "pin")
+        shaft.forces(loc=length / 2, fy=-100.0)
+        moment_at_midspan = shaft.bending_moment()["y"].subs(X, length / 2)
+        assert abs(float(moment_at_midspan)) == pytest.approx(100.0 * length / 4)
+
+    def test_bending_moment_z_plane_matches_hand_calc(self):
+        """Same case, loaded in z instead of y: max moment = P*L/4 about the other axis."""
+        length = 400.0
+        shaft = Shaft(diameter=30.0, length=length)
+        shaft.add_support(0, "pin").add_support(length, "pin")
+        shaft.forces(loc=length / 2, fz=-100.0)
+        moment_at_midspan = shaft.bending_moment()["z"].subs(X, length / 2)
+        assert abs(float(moment_at_midspan)) == pytest.approx(100.0 * length / 4)
+
+    def test_shear_force_jumps_across_point_load(self):
+        """Shear force steps by the point load's magnitude across its location."""
+        length = 400.0
+        shaft = Shaft(diameter=30.0, length=length)
+        shaft.add_support(0, "pin").add_support(length, "pin")
+        shaft.forces(loc=length / 2, fy=-100.0)
+        vy = shaft.shear_force()["y"]
+        left = float(vy.subs(X, length / 2 - 1))
+        right = float(vy.subs(X, length / 2 + 1))
+        assert right - left == pytest.approx(100.0)
+
+    def test_bending_moment_reflects_current_diameter(self):
+        """No caching: second_moment (and so the beam it feeds) uses the live diameter."""
+        shaft = Shaft(diameter=20.0, length=100.0)
+        shaft.add_support(0, "pin").add_support(100.0, "pin")
+        shaft.forces(loc=50.0, fy=-10.0)
+        first_second_moment = shaft.second_moment
+        shaft.diameter = 40.0
+        assert shaft.second_moment != pytest.approx(first_second_moment)
+        shaft.bending_moment()  # still solves cleanly against the new geometry
+
+    def test_axial_force_accumulates_along_x(self):
+        """_axial_force_at is a running sum of fx at or before x (no reaction solved)."""
+        shaft = Shaft(diameter=20.0, length=100.0)
+        shaft.forces(loc=30.0, fx=1000.0)
+        shaft.forces(loc=70.0, fx=2000.0)
+        assert shaft._axial_force_at(0.0) == pytest.approx(0.0)
+        assert shaft._axial_force_at(50.0) == pytest.approx(1000.0)
+        assert shaft._axial_force_at(100.0) == pytest.approx(3000.0)
 
 
 class TestKtData:
@@ -142,16 +264,17 @@ class TestShaftStressProfile:
     """Test cases for Shaft.stress_profile and Shaft.plot."""
 
     def test_no_peaks_without_grooves(self):
-        """A plain shaft's profile has a constant nominal stress and no peaks."""
+        """With no bending loads, nominal stress is pure torsion's von Mises value: sqrt(3)*tau."""
         shaft = Shaft(diameter=20.0, length=100.0)
         torque = 1.0e5
         profile = shaft.stress_profile(torque, n=10)
         assert profile["peaks"] == []
-        expected = shaft.torsional_stress(torque)
+        expected = math.sqrt(3) * shaft.torsional_stress(torque)
         assert all(s == pytest.approx(expected) for s in profile["nominal_stress"])
 
     def test_groove_peak_matches_stored_kt(self):
-        """The reported peak reuses the Kt row cached by add_groove."""
+        """The reported peak reuses the torsion Kt row cached by add_groove (no bending here,
+        so the effective 'kt' reduces exactly to kt_torsion and 'stress' is sqrt(3)*kt*tau)."""
         shaft = Shaft(diameter=30.0, length=100.0)
         shaft.add_groove(position=50.0, diameter=20.0, radii=3.0)
         torque = 1.0e5
@@ -162,13 +285,55 @@ class TestShaftStressProfile:
         expected_nominal = Shaft(diameter=20.0, length=1.0).torsional_stress(torque)
         assert peak["x"] == pytest.approx(50.0)
         assert peak["kt"] == pytest.approx(expected_kt)
-        assert peak["stress"] == pytest.approx(expected_kt * expected_nominal)
+        assert peak["kt_torsion"] == pytest.approx(expected_kt)
+        assert peak["stress"] == pytest.approx(math.sqrt(3) * expected_kt * expected_nominal)
 
     def test_requires_at_least_two_samples(self):
         """n < 2 is rejected."""
         shaft = Shaft(diameter=20.0, length=100.0)
         with pytest.raises(ValueError):
             shaft.stress_profile(torque=1.0e5, n=1)
+
+    def test_bending_load_raises_nominal_stress_at_the_load(self):
+        """A shaft with a bent-into midspan load reads higher there than an
+        unloaded shaft with the same torque — bending is actually reaching
+        stress_profile()/plot(), not just torsion."""
+        length = 200.0
+        torque = 5.0e4
+        plain = Shaft(diameter=25.0, length=length)
+        bent = Shaft(diameter=25.0, length=length)
+        bent.add_support(0, "pin").add_support(length, "pin")
+        bent.forces(loc=length / 2, fy=-500.0)
+
+        plain_mid = plain.stress_profile(torque, n=21)["nominal_stress"][10]
+        bent_mid = bent.stress_profile(torque, n=21)["nominal_stress"][10]
+        assert bent_mid > plain_mid
+        # torque=0 case is pure bending: sigma_vm should reduce to |sigma_bending|
+        bent_no_torque = bent.stress_profile(n=21)["nominal_stress"][10]
+        expected_bending = (500.0 * length / 4) * (25.0 / 2) / (math.pi * 25.0 ** 4 / 64)
+        assert bent_no_torque == pytest.approx(expected_bending)
+
+    def test_pure_axial_load_matches_hand_calc(self):
+        """A single axial point load, no bending/torque: sigma = Fx/A, zero before it."""
+        diameter = 20.0
+        shaft = Shaft(diameter=diameter, length=100.0)
+        shaft.forces(loc=100.0, fx=5000.0)
+        profile = shaft.stress_profile(n=11)
+        area = math.pi * diameter ** 2 / 4
+        assert profile["nominal_stress"][0] == pytest.approx(0.0, abs=1e-9)
+        assert profile["nominal_stress"][-1] == pytest.approx(5000.0 / area)
+
+    def test_axial_stress_at_groove_uses_kt_axial(self):
+        """A groove's peak stress reflects its own kt_axial for the axial component."""
+        diameter = 20.0
+        shaft = Shaft(diameter=diameter, length=100.0)
+        shaft.add_groove(position=50.0, diameter=14.0, radii=1.0)
+        shaft.forces(loc=0, fx=3000.0)  # active at the groove (loc=0 <= position=50)
+        peak = shaft.stress_profile(n=11)["peaks"][0]
+        kt_axial = shaft.grooves[0][2]
+        expected = kt_axial * 3000.0 / (math.pi * 14.0 ** 2 / 4)
+        assert peak["kt_axial"] == pytest.approx(kt_axial)
+        assert peak["stress"] == pytest.approx(expected)
 
     def test_plot_returns_figure(self):
         """Smoke test for the matplotlib plot."""
@@ -304,6 +469,21 @@ class TestSteppedShaft:
         ss.add_shaft(Shaft(diameter=20.0, length=50.0), "fillet", 3.0)
         with pytest.raises(ValueError):
             ss.stress_profile(torque=1.0e5, n=1)
+
+    def test_fillet_peak_includes_bending_from_adjoining_segment(self):
+        """A fillet's peak reflects bending on the smaller adjoining segment
+        (evaluated right at the fillet), not just torsion."""
+        base = self._base(diameter=30.0, length=100.0)
+        ss = SteppedShaft(base)
+        small = Shaft(diameter=20.0, length=150.0)
+        small.add_support(0, "fixed")
+        small.forces(loc=150.0, fy=-500.0)
+        ss.add_shaft(small, "fillet", 3.0)
+
+        fillet_peak = ss.stress_profile()["peaks"][0]
+        assert fillet_peak["kind"] == "fillet"
+        expected_bending = (500.0 * 150.0) * (20.0 / 2) / (math.pi * 20.0 ** 4 / 64)
+        assert fillet_peak["stress"] == pytest.approx(fillet_peak["kt_bending"] * expected_bending)
 
     def test_stepped_shaft_repr(self):
         """Test stepped shaft string representation."""

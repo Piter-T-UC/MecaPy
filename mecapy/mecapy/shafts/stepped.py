@@ -4,6 +4,8 @@ Units convention: geometry in mm, torque in N*mm and stresses in MPa
 (N/mm^2), consistent with :mod:`mecapy.shafts.shaft`.
 """
 
+import math
+
 from ..base import MechaElement
 from .kt_data import get_kt_shoulder_fillet
 from .shaft import Shaft
@@ -146,24 +148,32 @@ class SteppedShaft(MechaElement):
 
     # ---- Stress ----
 
-    def stress_profile(self, torque, n=200):
+    def stress_profile(self, torque=0, n=200):
         """
-        Sample nominal torsional stress along the fused shaft by
+        Sample the combined von Mises stress along the fused shaft by
         stitching together each segment's own
-        :meth:`~mecapy.shafts.shaft.Shaft.stress_profile`, plus one
-        Kt-amplified peak per fillet.
+        :meth:`~mecapy.shafts.shaft.Shaft.stress_profile` (torsion +
+        bending + axial, from whatever ``add_support``/``forces`` calls
+        were made on that segment directly — see the module note below),
+        plus one Kt-amplified peak per fillet, combined the same way.
+
+        Note: each segment solves its own independent bending/axial
+        state; there's no beam continuity carried across a fillet, so a
+        fillet's peak uses the *smaller* adjoining segment's own moment
+        and axial force right at that boundary, not a shared solve.
 
         Args:
             torque (float): Applied torque, N*mm, assumed constant along
-                the shaft.
+                the shaft (default: 0).
             n (int): Total number of points sampling the nominal-stress
                 curve, split evenly across segments (>= 2).
 
         Returns:
             dict: ``{"x": [mm, ...], "nominal_stress": [MPa, ...],
-            "peaks": [{"x", "diameter", "kt", "stress", "kind",
-            "number"}, ...]}``, peaks sorted by axial position; ``kind``
-            is ``"groove"`` or ``"fillet"``.
+            "peaks": [{"x", "diameter", "kt_torsion", "kt_bending",
+            "kt_axial", "kt", "stress", "kind", "number"}, ...]}``, peaks
+            sorted by axial position; ``kind`` is ``"groove"`` or
+            ``"fillet"``.
 
         Raises:
             ValueError: If n < 2.
@@ -183,12 +193,26 @@ class SteppedShaft(MechaElement):
                 peaks.append({**p, "x": p["x"] + offset, "kind": "groove"})
 
         for i, fillet in enumerate(self.fillets):
-            number, (_D, d, _radius), _kt_axial, _kt_bending, kt_torsion = fillet
-            smaller = self.segments[i] if self.segments[i].diameter == d else self.segments[i + 1]
-            nominal_stress = smaller.torsional_stress(torque)
+            number, (_D, d, _radius), kt_axial, kt_bending, kt_torsion = fillet
+            if self.segments[i].diameter == d:
+                smaller, local_x = self.segments[i], self.segments[i].length
+            else:
+                smaller, local_x = self.segments[i + 1], 0
+            moments = smaller.bending_moment()
+            tau = smaller._torsional_stress_at(d, torque)
+            sigma_bending = smaller._bending_stress_at(local_x, d, moments["y"], moments["z"])
+            sigma_axial = smaller._axial_stress_at(local_x, d)
+            unconcentrated_sigma = sigma_bending + sigma_axial
+            unconcentrated = math.sqrt(unconcentrated_sigma ** 2 + 3 * tau ** 2)
+            sigma = kt_bending * sigma_bending + kt_axial * sigma_axial
+            stress = math.sqrt(sigma ** 2 + 3 * (kt_torsion * tau) ** 2)
+            effective_kt = (
+                stress / unconcentrated if unconcentrated else max(kt_torsion, kt_bending, kt_axial)
+            )
             peaks.append({
-                "x": boundaries[i + 1], "diameter": d, "kt": kt_torsion,
-                "stress": kt_torsion * nominal_stress, "kind": "fillet", "number": number,
+                "x": boundaries[i + 1], "diameter": d,
+                "kt_torsion": kt_torsion, "kt_bending": kt_bending, "kt_axial": kt_axial,
+                "kt": effective_kt, "stress": stress, "kind": "fillet", "number": number,
             })
 
         peaks.sort(key=lambda p: p["x"])
@@ -216,15 +240,16 @@ class SteppedShaft(MechaElement):
             rs.extend(seg_r)
         return xs, rs
 
-    def plot(self, torque, n=200, show=True, ax=None):
+    def plot(self, torque=0, n=200, show=True, ax=None):
         """
         Draw the stepped shaft's outline (diameter changes, fillets, and
-        grooves, to scale) with the torsional stress along its length
-        plotted beneath it on a shared x-axis.
+        grooves, to scale) with the combined von Mises stress (see
+        :meth:`stress_profile`) along its length plotted beneath it on a
+        shared x-axis.
 
         Args:
             torque (float): Applied torque, N*mm, used for the stress
-                curve.
+                curve (default: 0).
             n (int): Number of points sampling the nominal-stress curve.
             show (bool): Call ``plt.show()`` (default: True). Pass False
                 when embedding or testing.
@@ -267,12 +292,16 @@ class SteppedShaft(MechaElement):
         profile = self.stress_profile(torque, n=n)
         ax_stress.plot(
             profile["x"], profile["nominal_stress"],
-            color="#3c25eb", linewidth=1.5, label="nominal stress",
+            color="#3c25eb", linewidth=1.5, label="nominal von Mises stress",
         )
         for p in profile["peaks"]:
             ax_stress.plot(p["x"], p["stress"], "o", color="#d90b0b", zorder=3)
+            label = (
+                f"Kt={p['kt']:.2f} (t={p['kt_torsion']:.2f}, b={p['kt_bending']:.2f}, "
+                f"a={p['kt_axial']:.2f})\n{p['stress']:.1f} MPa"
+            )
             ax_stress.annotate(
-                f"Kt={p['kt']:.2f}\n{p['stress']:.1f} MPa",
+                label,
                 (p["x"], p["stress"]),
                 textcoords="offset points",
                 xytext=(6, 6),
@@ -280,7 +309,7 @@ class SteppedShaft(MechaElement):
                 color="#d90b0b",
             )
         ax_stress.set_xlabel("axial position [mm]")
-        ax_stress.set_ylabel("torsional stress [MPa]")
+        ax_stress.set_ylabel("von Mises stress [MPa]")
         ax_stress.grid(True, color="#e5e7eb", linewidth=0.8)
         ax_stress.set_axisbelow(True)
         ax_stress.legend(loc="best", fontsize=9)
