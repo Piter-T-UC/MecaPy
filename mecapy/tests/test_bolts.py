@@ -1,0 +1,560 @@
+"""Tests for bolt module."""
+
+from math import isclose, log, pi, sqrt
+
+import pytest
+
+from mecapy.bolts import Bolt, BoltedUnion, get_pitch, shigley_thread_geometry
+
+
+class TestBolt:
+    """Test cases for Bolt class."""
+
+    def test_bolt_creation(self):
+        """Test creating a bolt object."""
+        bolt = Bolt(size="M10", length=50.0, property_class="8.8", material="steel")
+        assert bolt.size == "M10"
+        assert bolt.length == 50.0
+        assert bolt.property_class == "8.8"
+        assert bolt.material == "steel"
+
+    def test_bolt_repr(self):
+        """Test bolt string representation."""
+        bolt = Bolt(size="M12", length=60.0)
+        assert "Bolt" in repr(bolt)
+        assert "M12" in repr(bolt)
+
+    def test_thread_geometry(self):
+        """Test pitch, diameters and areas from the ISO table."""
+        bolt = Bolt(size="M10", length=50.0)
+        assert bolt.pitch == 1.5
+        assert bolt.nominal_diameter == 10.0
+        assert bolt.diameter == 10.0
+        assert bolt.stress_area == 58.0
+        assert isclose(bolt.nominal_area, 78.5398, rel_tol=1e-4)
+
+    def test_strength_values(self):
+        """Test property-class strengths and proof load."""
+        bolt = Bolt(size="M10", length=50.0, property_class="8.8")
+        assert bolt.proof_strength == 580.0
+        assert bolt.yield_strength == 640.0
+        assert bolt.tensile_strength == 800.0
+        assert isclose(bolt.proof_load, 580.0 * 58.0)
+        assert isclose(bolt.recommended_preload, 0.75 * 580.0 * 58.0)
+
+    def test_stiffness_and_elongation(self):
+        """Test the axial stiffness model and elongation round-trip."""
+        bolt = Bolt(size="M10", length=50.0, material="steel")
+        # k = As * E / L with E = 210000 MPa for steel
+        expected_k = 58.0 * 210000.0 / 50.0
+        assert isclose(bolt.stiffness, expected_k)
+        force = 10000.0
+        assert isclose(bolt.elongation(force), force / expected_k)
+        # round-trip: k * delta == F
+        assert isclose(bolt.stiffness * bolt.elongation(force), force)
+
+    def test_tensile_stress_and_safety_factor(self):
+        """Test tensile stress on the stress area and safety factor."""
+        bolt = Bolt(size="M10", length=50.0, property_class="8.8")
+        assert isclose(bolt.tensile_stress(5800.0), 100.0)
+        assert isclose(bolt.bolt_safety_factor(5800.0), 640.0 / 100.0)
+
+    def test_invalid_inputs(self):
+        """Test that non-physical or unknown inputs raise ValueError."""
+        with pytest.raises(ValueError):
+            Bolt(size="M11", length=50.0)
+        with pytest.raises(ValueError):
+            Bolt(size="M10", length=50.0, property_class="9.9")
+        with pytest.raises(ValueError):
+            Bolt(size="M10", length=0.0)
+        with pytest.raises(ValueError):
+            Bolt(size="M10", length=50.0).bolt_safety_factor(0.0)
+
+
+def square_pattern():
+    """4-bolt square pattern, 100 mm side, centered at (50, 50)."""
+    return [[1, 0.0, 0.0], [2, 100.0, 0.0], [3, 100.0, 100.0], [4, 0.0, 100.0]]
+
+
+class TestBoltedUnion:
+    """Test cases for BoltedUnion class."""
+
+    def test_centroid(self):
+        """Test centroid of a symmetric square pattern."""
+        union = BoltedUnion(Bolt("M10", 50.0), square_pattern())
+        assert union.centroid == (50.0, 50.0)
+        assert union.n_bolts == 4
+
+    def test_direct_shear(self):
+        """Pure in-plane force splits equally among the bolts."""
+        union = BoltedUnion(Bolt("M10", 50.0), square_pattern(), forces=(4000.0, 0.0, 0.0))
+        for entry in union.bolt_forces().values():
+            assert isclose(entry["shear"][0], 1000.0)
+            assert isclose(entry["shear"][1], 0.0, abs_tol=1e-12)
+            assert isclose(entry["shear_magnitude"], 1000.0)
+            assert entry["axial"] == 0.0
+
+    def test_torsion(self):
+        """Pure torsion gives tangential shear Mz*r/sum(r^2), zero resultant."""
+        mz = 1e6
+        union = BoltedUnion(Bolt("M10", 50.0), square_pattern(), moments=(0.0, 0.0, mz))
+        forces = union.bolt_forces()
+        r = sqrt(2) * 50.0
+        sum_r2 = 4 * r ** 2
+        expected = mz * r / sum_r2
+        total_x = total_y = 0.0
+        for number, entry in forces.items():
+            assert isclose(entry["shear_magnitude"], expected)
+            total_x += entry["shear"][0]
+            total_y += entry["shear"][1]
+        assert isclose(total_x, 0.0, abs_tol=1e-9)
+        assert isclose(total_y, 0.0, abs_tol=1e-9)
+        # bolt 1 at (-50, -50) relative: force (-Mz*dy, Mz*dx)/sum_r2 = (+, -)
+        fsx, fsy = forces[1]["shear"]
+        assert fsx > 0 and fsy < 0
+
+    def test_shear_component_breakdown(self):
+        """shear_direct + shear_torsion sum to shear, with correct signs."""
+        mz = 1e6
+        union = BoltedUnion(
+            Bolt("M10", 50.0), square_pattern(),
+            forces=(4000.0, 0.0, 0.0), moments=(0.0, 0.0, mz),
+        )
+        forces = union.bolt_forces()
+        sum_r2 = 4 * (sqrt(2) * 50.0) ** 2
+        for number, entry in forces.items():
+            vx, vy = entry["shear_direct"]
+            tx, ty = entry["shear_torsion"]
+            assert isclose(vx, 1000.0)
+            assert isclose(vy, 0.0, abs_tol=1e-12)
+            assert isclose(vx + tx, entry["shear"][0])
+            assert isclose(vy + ty, entry["shear"][1])
+        # Bolt 1 at (-50, -50) relative: (tx, ty) = (-Mz*dy, Mz*dx)/sum_r2
+        tx, ty = forces[1]["shear_torsion"]
+        assert isclose(tx, mz * 50.0 / sum_r2)
+        assert isclose(ty, -mz * 50.0 / sum_r2)
+
+    def test_shear_torsion_zero_without_mz(self):
+        """No torsion moment -> torsion components are exactly (0, 0)."""
+        union = BoltedUnion(
+            Bolt("M10", 50.0), square_pattern(), forces=(4000.0, -2000.0, 0.0)
+        )
+        for entry in union.bolt_forces().values():
+            assert entry["shear_torsion"] == (0.0, 0.0)
+            assert entry["shear"] == entry["shear_direct"]
+
+    def test_direct_axial(self):
+        """Pure axial force splits equally."""
+        union = BoltedUnion(Bolt("M10", 50.0), square_pattern(), forces=(0.0, 0.0, 8000.0))
+        for entry in union.bolt_forces().values():
+            assert isclose(entry["axial"], 2000.0)
+            assert entry["shear_magnitude"] == 0.0
+
+    def test_bending(self):
+        """Pure Mx bending loads bolts proportionally to their y offset."""
+        mx = 2e5
+        union = BoltedUnion(Bolt("M10", 50.0), square_pattern(), moments=(mx, 0.0, 0.0))
+        forces = union.bolt_forces()
+        # dy = +/-50, sum_dy2 = 4*2500 = 10000 -> axial = +/- mx*50/10000
+        expected = mx * 50.0 / 10000.0
+        assert isclose(forces[3]["axial"], expected)   # y = 100 (dy = +50), tension
+        assert isclose(forces[4]["axial"], expected)
+        assert isclose(forces[1]["axial"], -expected)  # y = 0 (dy = -50), compression
+        assert isclose(forces[2]["axial"], -expected)
+
+    def test_equilibrium(self):
+        """Per-bolt forces re-sum to the applied loads under combined loading."""
+        union = BoltedUnion(
+            Bolt("M12", 60.0), square_pattern(),
+            forces=(3000.0, -2000.0, 5000.0), moments=(1e5, -2e5, 5e5),
+        )
+        forces = union.bolt_forces()
+        x_bar, y_bar = union.centroid
+        sum_fx = sum(e["shear"][0] for e in forces.values())
+        sum_fy = sum(e["shear"][1] for e in forces.values())
+        sum_fz = sum(e["axial"] for e in forces.values())
+        sum_mx = sum_my = sum_mz = 0.0
+        for row in union.positions:
+            number, x, y = row
+            dx, dy = x - x_bar, y - y_bar
+            fsx, fsy = forces[number]["shear"]
+            fz = forces[number]["axial"]
+            sum_mz += dx * fsy - dy * fsx
+            sum_mx += dy * fz
+            sum_my += -dx * fz
+        assert isclose(sum_fx, 3000.0)
+        assert isclose(sum_fy, -2000.0)
+        assert isclose(sum_fz, 5000.0)
+        assert isclose(sum_mx, 1e5)
+        assert isclose(sum_my, -2e5)
+        assert isclose(sum_mz, 5e5)
+
+    def test_max_loaded_bolt_and_safety_factors(self):
+        """Most loaded bolt and per-bolt safety factors are consistent."""
+        union = BoltedUnion(
+            Bolt("M12", 60.0), square_pattern(),
+            forces=(3000.0, 0.0, 5000.0), moments=(1e5, 0.0, 5e5),
+        )
+        number, entry = union.max_loaded_bolt()
+        factors = union.safety_factors()
+        assert set(factors) == {1, 2, 3, 4}
+        assert factors[number] == min(factors.values())
+        assert all(sf > 0 for sf in factors.values())
+
+    def test_invalid_inputs(self):
+        """Test constructor and distribution validation."""
+        bolt = Bolt("M10", 50.0)
+        with pytest.raises(ValueError):
+            BoltedUnion("not a bolt", square_pattern())
+        with pytest.raises(ValueError):
+            BoltedUnion(bolt, [[1, 0.0]])
+        with pytest.raises(ValueError):
+            BoltedUnion(bolt, [[1, 0.0, 0.0], [1, 10.0, 0.0]])
+        with pytest.raises(ValueError):
+            BoltedUnion(bolt, [])
+        with pytest.raises(ValueError):
+            BoltedUnion(bolt, square_pattern(), forces=(1.0, 2.0))
+        with pytest.raises(ValueError):
+            BoltedUnion(bolt, square_pattern(), moments=(1.0,))
+        # torsion with a single bolt at the centroid has no lever arm
+        with pytest.raises(ValueError):
+            BoltedUnion(bolt, [[1, 0.0, 0.0]], moments=(0.0, 0.0, 1e5)).bolt_forces()
+        # bending Mx with all bolts on the x axis
+        with pytest.raises(ValueError):
+            BoltedUnion(
+                bolt, [[1, 0.0, 0.0], [2, 100.0, 0.0]], moments=(1e5, 0.0, 0.0)
+            ).bolt_forces()
+
+    def test_plot_distribution_smoke(self):
+        """Plot returns a matplotlib Figure without showing it."""
+        matplotlib = pytest.importorskip("matplotlib")
+        matplotlib.use("Agg")
+        from matplotlib.figure import Figure
+
+        union = BoltedUnion(
+            Bolt("M10", 50.0), square_pattern(),
+            forces=(3000.0, 1000.0, 5000.0), moments=(1e5, 0.0, 5e5),
+        )
+        fig = union.plot_distribution(show=False)
+        assert isinstance(fig, Figure)
+
+
+class TestThreadDataHelpers:
+    """Test cases for the pitch lookup and Shigley geometry helpers."""
+
+    def test_get_pitch_by_size_and_diameter(self):
+        """Pitch can be queried by designation or nominal diameter."""
+        assert get_pitch("M10") == 1.5
+        assert get_pitch(10) == 1.5
+        assert get_pitch(10.0) == 1.5
+        assert get_pitch("M24") == 3.0
+
+    def test_get_pitch_unknown(self):
+        """Unknown sizes and diameters raise ValueError."""
+        with pytest.raises(ValueError):
+            get_pitch("M11")
+        with pytest.raises(ValueError):
+            get_pitch(11.0)
+
+    def test_shigley_geometry_m10(self):
+        """Shigley formulas reproduce the ISO M10 stress area closely."""
+        geometry = shigley_thread_geometry(10.0, 1.5)
+        assert isclose(geometry["minor_diameter"], 10.0 - 1.226869 * 1.5)
+        assert isclose(geometry["pitch_diameter"], 10.0 - 0.649519 * 1.5)
+        # At = (pi/4)*((dp + dr)/2)^2 = 58.0 mm^2 within 0.1%
+        assert isclose(geometry["stress_area"], 58.0, rel_tol=1e-3)
+
+    def test_shigley_geometry_validation(self):
+        """Non-physical diameter/pitch combinations raise ValueError."""
+        with pytest.raises(ValueError):
+            shigley_thread_geometry(0.0, 1.5)
+        with pytest.raises(ValueError):
+            shigley_thread_geometry(10.0, 0.0)
+        with pytest.raises(ValueError):
+            shigley_thread_geometry(1.0, 1.0)  # minor diameter <= 0
+
+
+class TestCustomBolt:
+    """Test cases for custom (diameter + pitch) bolts and the Shigley flag."""
+
+    def test_custom_bolt_shigley_area(self):
+        """Custom M10x1.5 matches the ISO table area within 0.1%."""
+        bolt = Bolt(length=50.0, diameter=10.0, pitch=1.5)
+        assert bolt.stress_area_method == "shigley"
+        assert bolt.size == "M10x1.5"
+        assert "M10x1.5" in repr(bolt)
+        assert isclose(bolt.minor_diameter, 8.1596965)
+        assert isclose(bolt.pitch_diameter, 9.0257215)
+        assert isclose(bolt.stress_area, 58.0, rel_tol=1e-3)
+
+    def test_custom_fine_pitch(self):
+        """Fine-series M12x1.25 matches Shigley Table 8-1 (92.1 mm^2)."""
+        bolt = Bolt(length=60.0, diameter=12.0, pitch=1.25)
+        assert isclose(bolt.stress_area, 92.1, rel_tol=1e-3)
+        assert bolt.pitch == 1.25
+
+    def test_shigley_optin_on_table_size(self):
+        """Table sizes keep the table area unless Shigley is requested."""
+        table_bolt = Bolt("M10", 50.0)
+        shigley_bolt = Bolt("M10", 50.0, stress_area_method="shigley")
+        assert table_bolt.stress_area == 58.0
+        assert table_bolt.stress_area_method == "table"
+        assert shigley_bolt.stress_area_method == "shigley"
+        assert isclose(shigley_bolt.stress_area, 58.0, rel_tol=1e-3)
+        assert shigley_bolt.stress_area != 58.0
+
+    def test_minor_pitch_diameter_on_table_bolt(self):
+        """Table bolts also expose the Shigley minor/pitch diameters."""
+        bolt = Bolt("M12", 60.0)
+        assert isclose(bolt.minor_diameter, 12.0 - 1.226869 * 1.75)
+        assert isclose(bolt.pitch_diameter, 12.0 - 0.649519 * 1.75)
+
+    def test_custom_bolt_validation(self):
+        """Inconsistent size/diameter/pitch combinations raise ValueError."""
+        with pytest.raises(ValueError):
+            Bolt(size="M10", length=50.0, diameter=10.0, pitch=1.5)
+        with pytest.raises(ValueError):
+            Bolt(length=50.0, pitch=1.5)
+        with pytest.raises(ValueError):
+            Bolt(length=50.0)
+        with pytest.raises(ValueError):
+            Bolt(length=50.0, diameter=1.0, pitch=1.0)
+        with pytest.raises(ValueError):
+            Bolt(length=50.0, diameter=10.0, pitch=1.5, stress_area_method="table")
+        with pytest.raises(ValueError):
+            Bolt("M10", 50.0, stress_area_method="bogus")
+        with pytest.raises(ValueError):
+            Bolt(diameter=10.0, pitch=1.5)  # missing length
+
+
+def steel_plates():
+    """Two 20 mm steel plates (grip 40 mm)."""
+    return [(20.0, "steel"), (20.0, "steel")]
+
+
+class TestBoltedUnionJoint:
+    """Test cases for set_bolt, plates, member stiffness and preload."""
+
+    def test_set_bolt(self):
+        """set_bolt swaps the bolt and keeps the rest of the union."""
+        union = BoltedUnion(Bolt("M10", 50.0), square_pattern(),
+                            forces=(0.0, 0.0, 8000.0))
+        union.set_bolt(Bolt("M12", 50.0))
+        assert union.bolt.size == "M12"
+        assert union.material == "steel"
+        assert union.n_bolts == 4
+        with pytest.raises(ValueError):
+            union.set_bolt("not a bolt")
+
+    def test_set_bolt_grip_check(self):
+        """Bolts shorter than the grip are rejected."""
+        with pytest.raises(ValueError):
+            BoltedUnion(Bolt("M10", 50.0), square_pattern(),
+                        plates=[(30.0, "steel"), (30.0, "steel")])
+        union = BoltedUnion(Bolt("M10", 50.0), square_pattern(),
+                            plates=steel_plates())
+        with pytest.raises(ValueError):
+            union.set_bolt(Bolt("M10", 30.0))
+
+    def test_member_stiffness_symmetric(self):
+        """Two identical steel plates: hand-checked frustum stiffness.
+
+        d = 10, dw = 15, each half is one frustum with t = 20, D = 15:
+        ln argument = (23.1+5)*25 / ((23.1+25)*5) = 702.5/240.5,
+        k1 = 0.5774*pi*210000*10 / ln(702.5/240.5) ~= 3.5537e6 N/mm,
+        two in series -> km ~= 1.7769e6 N/mm.
+        """
+        union = BoltedUnion(Bolt("M10", 50.0), square_pattern(),
+                            plates=steel_plates())
+        assert union.grip == 40.0
+        expected_k1 = 0.5774 * pi * 210000.0 * 10.0 / log(702.5 / 240.5)
+        assert isclose(union.member_stiffness, expected_k1 / 2, rel_tol=1e-9)
+        assert isclose(union.member_stiffness, 1.7769e6, rel_tol=1e-3)
+        # kb = As*E/grip = 58*210000/40
+        assert isclose(union.bolt_stiffness, 304500.0)
+        expected_c = 304500.0 / (304500.0 + expected_k1 / 2)
+        assert isclose(union.joint_constant, expected_c, rel_tol=1e-9)
+        assert isclose(union.joint_constant, 0.1463, rel_tol=1e-3)
+
+    def test_member_stiffness_asymmetric(self):
+        """Mixed stack split at the midplane: 3 frusta recomputed longhand.
+
+        Plates: 10 mm steel + 30 mm aluminum, grip 40, midplane at 20.
+        Top half: steel t=10 D=15, aluminum t=10 D=15+1.155*10.
+        Bottom half: aluminum t=20 D=15.
+        """
+        union = BoltedUnion(Bolt("M10", 50.0), square_pattern(),
+                            plates=[(10.0, "steel"), (30.0, "aluminum")])
+        e_steel, e_alu = 210000.0, 69000.0  # database values in MPa
+        d, dw = 10.0, 15.0
+
+        def frustum_k(t, big_d, modulus):
+            ln_arg = ((1.155 * t + big_d - d) * (big_d + d)) / (
+                (1.155 * t + big_d + d) * (big_d - d))
+            return 0.5774 * pi * modulus * d / log(ln_arg)
+
+        k1 = frustum_k(10.0, dw, e_steel)
+        k2 = frustum_k(10.0, dw + 1.155 * 10.0, e_alu)
+        k3 = frustum_k(20.0, dw, e_alu)
+        expected_km = 1 / (1 / k1 + 1 / k2 + 1 / k3)
+        assert isclose(union.member_stiffness, expected_km, rel_tol=1e-9)
+        # softer than the all-steel symmetric stack of the same grip
+        all_steel = BoltedUnion(Bolt("M10", 50.0), square_pattern(),
+                                plates=steel_plates())
+        assert union.member_stiffness < all_steel.member_stiffness
+
+    def test_bolt_tensions_separation_proof(self):
+        """Preload-aware distribution and factors, hand-checked chain.
+
+        M10 8.8: Fi = 0.75*580*58 = 25230 N; Fz = 40000 -> P = 10000 N.
+        """
+        union = BoltedUnion(Bolt("M10", 50.0), square_pattern(),
+                            forces=(0.0, 0.0, 40000.0), plates=steel_plates())
+        c = union.joint_constant
+        fi = 25230.0
+        assert isclose(union.effective_preload, fi)
+        tensions = union.bolt_tensions()
+        for entry in tensions.values():
+            assert isclose(entry["external"], 10000.0)
+            assert isclose(entry["bolt_tension"], fi + c * 10000.0)
+            assert isclose(entry["member_force"], (1 - c) * 10000.0 - fi)
+            assert entry["member_force"] < 0  # still clamped
+        for n0 in union.separation_safety_factors().values():
+            assert isclose(n0, fi / ((1 - c) * 10000.0))
+            assert isclose(n0, 2.955, rel_tol=1e-3)
+        for nl in union.proof_safety_factors().values():
+            assert isclose(nl, (580.0 * 58.0 - fi) / (c * 10000.0))
+            assert isclose(nl, 5.748, rel_tol=1e-3)
+
+    def test_slip_safety_factors(self):
+        """Slip factor is friction capacity over bolt shear."""
+        union = BoltedUnion(Bolt("M10", 50.0), square_pattern(),
+                            forces=(8000.0, 0.0, 0.0), plates=steel_plates())
+        # V = 2000 N/bolt, P = 0 -> clamp = Fi = 25230 N
+        for n_slip in union.slip_safety_factors(mu=0.2).values():
+            assert isclose(n_slip, 0.2 * 25230.0 / 2000.0)
+        with pytest.raises(ValueError):
+            union.slip_safety_factors(mu=0.0)
+
+    def test_explicit_preload(self):
+        """Explicit preload overrides the recommended value everywhere."""
+        union = BoltedUnion(Bolt("M10", 50.0), square_pattern(),
+                            forces=(0.0, 0.0, 40000.0), plates=steel_plates(),
+                            preload=20000.0)
+        c = union.joint_constant
+        assert union.effective_preload == 20000.0
+        for n0 in union.separation_safety_factors().values():
+            assert isclose(n0, 20000.0 / ((1 - c) * 10000.0))
+        union.set_preload(None)
+        assert isclose(union.effective_preload, 25230.0)
+        with pytest.raises(ValueError):
+            union.set_preload(-1.0)
+        with pytest.raises(ValueError):
+            union.set_preload(1e9)  # above proof load
+
+    def test_joint_methods_require_plates(self):
+        """Member-model accessors raise without plates."""
+        union = BoltedUnion(Bolt("M10", 50.0), square_pattern(),
+                            forces=(1000.0, 0.0, 4000.0))
+        for attr in ("grip", "bolt_stiffness", "member_stiffness", "joint_constant"):
+            with pytest.raises(ValueError):
+                getattr(union, attr)
+        for method in (union.bolt_tensions, union.separation_safety_factors,
+                       union.proof_safety_factors, union.slip_safety_factors):
+            with pytest.raises(ValueError):
+                method()
+
+    def test_plates_validation(self):
+        """Malformed plate stacks raise ValueError."""
+        bolt = Bolt("M10", 50.0)
+        with pytest.raises(ValueError):
+            BoltedUnion(bolt, square_pattern(), plates=[(0.0, "steel"), (20.0, "steel")])
+        with pytest.raises(ValueError):
+            BoltedUnion(bolt, square_pattern(), plates=[(20.0, "unobtainium"), (20.0, "steel")])
+        with pytest.raises(ValueError):
+            BoltedUnion(bolt, square_pattern(), plates=[(20.0, "steel")])
+        with pytest.raises(ValueError):
+            BoltedUnion(bolt, square_pattern(), plates=[(20.0,), (20.0, "steel")])
+
+    def test_safety_factors_unchanged_with_plates(self):
+        """The historical safety_factors() ignores the member model."""
+        loads = {"forces": (3000.0, 0.0, 5000.0), "moments": (1e5, 0.0, 5e5)}
+        bare = BoltedUnion(Bolt("M12", 60.0), square_pattern(), **loads)
+        with_plates = BoltedUnion(Bolt("M12", 60.0), square_pattern(),
+                                  plates=steel_plates(), **loads)
+        assert bare.safety_factors() == with_plates.safety_factors()
+
+
+class TestMinimumBolt:
+    """Test cases for required_stress_area and minimum_bolt sizing."""
+
+    def test_minimum_bolt_pure_shear(self):
+        """Slip-critical sizing under pure shear, hand-checked.
+
+        V = 2000 N/bolt, mu = 0.2 -> Fi >= 10000 N ->
+        At >= 10000/(0.75*580) = 22.99 mm^2 -> M8 (36.6; M6 = 20.1 fails).
+        """
+        union = BoltedUnion(Bolt("M10", 50.0), square_pattern(),
+                            forces=(8000.0, 0.0, 0.0))
+        assert isclose(union.required_stress_area(mu=0.2), 22.99, rel_tol=1e-3)
+        assert union.minimum_bolt(mu=0.2).size == "M8"
+        # doubling the design factor doubles the required area -> M10
+        assert isclose(union.required_stress_area(mu=0.2, safety_factor=2.0),
+                       45.98, rel_tol=1e-3)
+        assert union.minimum_bolt(mu=0.2, safety_factor=2.0).size == "M10"
+        # the union itself is not modified
+        assert union.bolt.size == "M10"
+
+    def test_minimum_bolt_shear_plus_tension(self):
+        """Tension adds to the friction demand and the proof check.
+
+        V = 2000, P = 5000 N/bolt: slip needs Fi >= 2000/0.2 + 5000 =
+        15000 -> At >= 34.48; proof (C=1): At >= 4*5000/580 = 34.48 -> M8.
+        """
+        union = BoltedUnion(Bolt("M10", 50.0), square_pattern(),
+                            forces=(8000.0, 0.0, 20000.0))
+        assert isclose(union.required_stress_area(mu=0.2), 34.48, rel_tol=1e-3)
+        bolt = union.minimum_bolt(mu=0.2)
+        assert bolt.size == "M8"
+        assert bolt.property_class == "8.8"
+        assert bolt.length == 50.0
+
+    def test_minimum_bolt_property_class(self):
+        """A stronger property class can shrink the required bolt."""
+        union = BoltedUnion(Bolt("M10", 50.0, property_class="4.6"),
+                            square_pattern(), forces=(8000.0, 0.0, 0.0))
+        weak = union.minimum_bolt(mu=0.2, property_class="4.6")
+        strong = union.minimum_bolt(mu=0.2, property_class="12.9")
+        assert weak.property_class == "4.6"
+        assert strong.property_class == "12.9"
+        assert strong.stress_area <= weak.stress_area
+
+    def test_minimum_bolt_with_plates_consistency(self):
+        """With plates, the returned bolt passes every joint check >= n."""
+        union = BoltedUnion(Bolt("M10", 50.0), square_pattern(),
+                            forces=(8000.0, 0.0, 20000.0),
+                            plates=steel_plates())
+        bolt = union.minimum_bolt(mu=0.2)
+        union.set_bolt(bolt)
+        tol = 1 - 1e-9
+        assert all(v >= tol for v in union.slip_safety_factors(mu=0.2).values())
+        assert all(v >= tol for v in union.proof_safety_factors().values())
+        assert all(v >= tol for v in union.separation_safety_factors().values())
+
+    def test_minimum_bolt_validation(self):
+        """Invalid inputs and impossible loads raise ValueError."""
+        union = BoltedUnion(Bolt("M10", 50.0), square_pattern(),
+                            forces=(8000.0, 0.0, 0.0))
+        with pytest.raises(ValueError):
+            union.minimum_bolt(mu=0.0)
+        with pytest.raises(ValueError):
+            union.minimum_bolt(mu=0.2, safety_factor=0.0)
+        with pytest.raises(ValueError):
+            union.minimum_bolt(mu=0.2, property_class="9.9")
+        unloaded = BoltedUnion(Bolt("M10", 50.0), square_pattern())
+        with pytest.raises(ValueError):
+            unloaded.minimum_bolt(mu=0.2)
+        huge = BoltedUnion(Bolt("M10", 50.0), square_pattern(),
+                           forces=(1e8, 0.0, 0.0))
+        with pytest.raises(ValueError):
+            huge.minimum_bolt(mu=0.2)
