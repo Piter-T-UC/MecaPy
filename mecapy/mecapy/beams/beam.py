@@ -1,6 +1,6 @@
 """Beam analysis built on top of SymPy's continuum-mechanics beam."""
 
-from sympy import symbols
+from sympy import Rational, symbols
 from sympy.physics.continuum_mechanics.beam import Beam as _SymBeam
 
 from ..base import MechaElement
@@ -104,6 +104,59 @@ class Beam(MechaElement):
     def add_distributed_load(self, value, start, end):
         """Add a uniformly distributed load (order 0) between two points."""
         return self.add_load(value, start, 0, end=end)
+    
+    def add_triangular_load(self, value, start, end):
+        """Add a uniformly triangular load (order 1) between two points."""
+        return self.add_load(value, start, 1, end=end)
+
+    def add_function_load(self, func, start=0, end=None, segments=50):
+        """
+        Add a distributed load given as an arbitrary function q = f(x)
+        (force per unit length), discretized into ``segments``
+        piecewise-constant distributed loads — each segment carries the
+        value of ``f`` at its midpoint. The approximation improves with
+        more segments; 50 is ample for smooth load shapes.
+
+        Segment positions are exact ``sympy.Rational`` values, since
+        sympy's reaction solver breaks on plain-float positions.
+
+        Args:
+            func (callable): Load intensity ``f(x)`` — takes a position
+                (float) and returns force per unit length (negative acts
+                downward).
+            start (float): Start of the loaded span (default: 0).
+            end (float): End of the loaded span (default: the beam's
+                full length).
+            segments (int): Number of constant-load segments (>= 1,
+                default: 50).
+
+        Returns:
+            Beam: ``self`` to allow method chaining.
+
+        Raises:
+            ValueError: If ``func`` is not callable, ``segments`` is not
+                a positive integer, or the span is not within
+                ``[0, length]``.
+        """
+        if not callable(func):
+            raise ValueError("func must be callable, q = f(x)")
+        if segments != int(segments) or segments < 1:
+            raise ValueError("segments must be a positive integer")
+        if end is None:
+            end = self.length
+        if not 0 <= start < end <= self.length:
+            raise ValueError(
+                f"Load span [{start}, {end}] must lie within [0, {self.length}]"
+            )
+        segments = int(segments)
+        start_r, end_r = Rational(start), Rational(end)
+        width = (end_r - start_r) / segments
+        for i in range(segments):
+            x0 = start_r + i * width
+            value = float(func(float(x0 + width / 2)))
+            if value:
+                self.add_load(value, x0, 0, end=x0 + width)
+        return self
 
     def solve(self):
         """

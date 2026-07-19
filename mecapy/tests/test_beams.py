@@ -67,6 +67,36 @@ class TestBeam:
         stress = beam.bending_stress(distance_to_fiber=0.1)
         assert stress == pytest.approx(2500 * 0.1 / I)
 
+    def test_function_load_constant(self):
+        """A constant q = f(x) reproduces the uniform-load reactions."""
+        E, I = symbols("E I", positive=True)
+        beam = Beam(length=10, elastic_modulus=E, second_moment=I)
+        beam.add_support(0, "pin").add_support(10, "roller")
+        beam.add_function_load(lambda x: -100, segments=10)
+        reactions = beam.reactions
+        assert float(reactions[symbols("R_0")]) == pytest.approx(500)
+        assert float(reactions[symbols("R_10")]) == pytest.approx(500)
+
+    def test_function_load_triangular_reactions(self):
+        """A triangular q(x) = -w*x gives reactions total/3 and 2*total/3."""
+        E, I = symbols("E I", positive=True)
+        beam = Beam(length=10, elastic_modulus=E, second_moment=I)
+        beam.add_support(0, "pin").add_support(10, "roller")
+        beam.add_function_load(lambda x: -12 * x, segments=100)  # total 600
+        reactions = beam.reactions
+        assert float(reactions[symbols("R_0")]) == pytest.approx(200, rel=1e-3)
+        assert float(reactions[symbols("R_10")]) == pytest.approx(400, rel=1e-3)
+
+    def test_function_load_validation(self):
+        """Bad function-load inputs raise ValueError."""
+        beam = Beam(length=10)
+        with pytest.raises(ValueError):
+            beam.add_function_load(123)
+        with pytest.raises(ValueError):
+            beam.add_function_load(lambda x: -1, start=8, end=5)
+        with pytest.raises(ValueError):
+            beam.add_function_load(lambda x: -1, segments=0)
+
     def test_beam_repr(self):
         """Test beam string representation."""
         beam = Beam(length=5.0, material="steel")
