@@ -9,13 +9,18 @@ A comprehensive Python library for mechanical engineering calculations and desig
 
 MecaPy provides tools for analyzing and designing various mechanical components:
 
-- **Beams** - Analysis of beams under various loading conditions
-- **Wheels** - Design and analysis of wheels
-- **Gears** - Gear design and transmission analysis
+- **Beams** - SymPy-backed analysis of beams under various loading conditions
+- **Wheels & Flywheels** - Rotating members: inertia, kinetic energy, flywheel sizing and burst speed
+- **Gears** - Full gear family (spur, helical, herringbone, bevel, worm, rack, planetary),
+  transmissions, profile shift, and AGMA 2101-D04 bending/pitting rating
 - **Bearings** - Bearing selection and life prediction
-- **Bolts** - Bolt stress and fastener analysis
-- **Welds** - Weld design and fatigue analysis
-- **Shafts** - Shaft design and deflection analysis
+- **Bolts** - ISO metric bolt stress plus multi-bolt joint (`BoltedUnion`) load distribution
+- **Welds** - Weld group analysis by the "weld as a line" method, sizing and stress plots
+- **Shafts & Power Screws** - Torsion, deflection, and lead-screw torque/efficiency/self-locking
+- **Clutches & Brakes** - Disc, cone and centrifugal clutches; shoe, band and caliper disc brakes
+  (Shigley Ch. 16, uniform-pressure and uniform-wear theories)
+- **Couplings** - Rigid flange couplings and catalog-style flexible couplings
+- **Thermal helpers** - Clutch/brake stop energy, temperature rise and Newton cooling
 
 ## Installation
 
@@ -26,9 +31,11 @@ MecaPy provides tools for analyzing and designing various mechanical components:
 
 ### From Source
 
+The Python project lives in the `MecaPy/` subdirectory of the repository:
+
 ```bash
 git clone https://github.com/piter-t-uc/mecapy.git
-cd mecapy
+cd mecapy/MecaPy
 pip install -e .
 ```
 
@@ -45,15 +52,31 @@ provides shared access to material properties and the fundamental
 stress/safety-factor calculations:
 
 ```
-MechaElement                # material, calculate_stress(), safety_factor()
-├── Beam                    # SymPy-backed: reactions, shear, moment, deflection
-├── Shaft                   # + torsional_stress()
-├── Gear                    # + pitch_diameter
-├── Wheel
-├── Bearing
-├── Bolt
-└── Weld
+MechaElement                              # material, calculate_stress(), safety_factor()
+├── Beam                                  # SymPy-backed: reactions, shear, moment, deflection
+├── Shaft                                 # + torsional_stress()
+│   └── PowerScrew                        # lead screw: thread stresses, buckling, efficiency
+├── Gear                                  # spur / helical / herringbone / bevel / worm / rack
+├── Wheel                                 # pulleys, sprockets; inertia, kinetic energy
+│   └── Flywheel                          # energy fluctuation sizing, rotating-disc stresses
+├── Bearing                               # rolling contact stress & life
+├── Bolt                                  # ISO metric: tension, preload, stiffness
+│   └── BoltedUnion                       # joint: load distribution, separation, efficiency
+├── AxialFrictionInterface                # annular friction math (both wear theories)
+│   ├── DiscClutch                        # flat disc (doubles as DiscBrake)
+│   └── ConeClutch                        # wedging cone
+├── CentrifugalClutch                     # spring-retained shoes, engagement speed
+├── InternalShoeBrake / ExternalShoeBrake # pivoted long shoe (Shigley 16-2..16-8)
+├── BandBrake                             # e^(mu*phi) tension ratio
+├── CaliperDiscBrake                      # annular-sector pads
+├── FlangeCoupling / FlexibleCoupling     # rigid and catalog-style shaft couplings
+└── Weld                                  # weld bead stresses & material
+    └── WeldedUnion                       # weld group: combined loading, sizing, plots
 ```
+
+The gear subsystem also provides composite elements: `Transmission` chains gear
+meshes into a kinematic system (ratios, output torque/power), and
+`PlanetaryGearSet` solves sun/planet/ring trains via the Willis equation.
 
 Because they all share `MechaElement`, any element can compute an axial
 stress and its safety factor against yielding:
@@ -90,14 +113,35 @@ stress = beam.bending_stress(distance_to_fiber=0.1)
 print(f"{float(stress)/1e6:.1f} MPa, SF = {beam.safety_factor(float(stress)):.1f}")
 ```
 
-### Designing a Gear
+### Designing a Gearbox
 
 ```python
-from mecapy.gears import Gear
+from mecapy.gears import SpurGear, Transmission
+from mecapy.gears.agma import AGMARating
 
-# Create a spur gear
-gear = Gear(teeth=20, module=2.5, material="steel")
-print(f"Pitch Diameter: {gear.pitch_diameter} mm")
+pinion = SpurGear(teeth=20, module=2.5, material="steel", face_width=25)
+gear = SpurGear(teeth=60, module=2.5, material="steel", face_width=25)
+print(f"Pitch Diameter: {pinion.pitch_diameter} mm")
+print(f"Center Distance: {pinion.center_distance_with(gear)} mm")
+
+trans = Transmission().add_stage(pinion, gear)   # validates the mesh
+print(f"Ratio: {trans.overall_ratio}")
+
+rating = AGMARating(pinion, gear, power_kw=7.5, pinion_speed_rpm=1800,
+                    hardness_HB=350)
+print(f"Bending SF: {rating.SF_pinion:.2f}, Contact SF: {rating.SH:.2f}")
+print(rating.summary())                          # full factor-by-factor report
+```
+
+### Sizing a Clutch
+
+```python
+from mecapy.clutches import DiscClutch
+
+clutch = DiscClutch(outer_diameter=250, inner_diameter=150,
+                    n_faces=2, lining="molded")  # lining supplies mu and p_max
+torque = clutch.torque_uniform_wear(actuating_force=5000)   # N*mm
+print(f"Torque capacity: {torque/1000:.1f} N*m")
 ```
 
 ### Torsion on a Shaft
@@ -133,7 +177,7 @@ make html
 
 ## Testing
 
-Run the test suite with pytest:
+Run the test suite with pytest (from the `MecaPy/` directory):
 
 ```bash
 pytest
@@ -153,6 +197,11 @@ MecaPy includes a material database with properties for common engineering mater
 - Aluminum
 - Copper
 - Cast Iron
+- Bronze
+
+Custom materials can be registered at runtime with
+`mecapy.materials.add_custom_material()`. Friction lining data for clutches and
+brakes lives in a separate table (`mecapy.clutches.friction_data`).
 
 Get available materials:
 
@@ -160,7 +209,7 @@ Get available materials:
 from mecapy.materials import get_available_materials
 
 materials = get_available_materials()
-print(materials)  # ['steel', 'aluminum', 'copper', 'cast_iron']
+print(materials)  # ['steel', 'aluminum', 'copper', 'cast_iron', 'bronze']
 ```
 
 ## Contributing
