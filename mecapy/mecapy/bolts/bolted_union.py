@@ -12,7 +12,7 @@ Load convention (right-handed axes, z out of the joint plane):
     - All loads act at the centroid of the bolt group.
 """
 
-from math import copysign, log, pi, sqrt
+from math import copysign, log, pi, radians, sqrt, tan
 
 from ..base import MechaElement
 from ..materials import get_material_properties
@@ -52,6 +52,9 @@ class BoltedUnion(MechaElement):
             from bolt-head side to nut side, or None.
         preload (float): Explicit per-bolt preload Fi in N, or None to
             use ``bolt.recommended_preload``.
+        cone_angle_deg (float): Half-angle of the Shigley frustum cones
+            in degrees (default: 30). Assign directly to use a different
+            angle in :attr:`member_stiffness` and :attr:`joint_constant`.
     """
 
     def __init__(self, bolt, positions, forces=(0, 0, 0), moments=(0, 0, 0),
@@ -105,6 +108,7 @@ class BoltedUnion(MechaElement):
         self.plates = None
         self.preload = None
         self._centroid_override = None
+        self.cone_angle_deg = 30.0
         self.set_plates(plates)
         self.set_preload(preload)
 
@@ -402,16 +406,19 @@ class BoltedUnion(MechaElement):
         """
         return self.bolt.stress_area * self.bolt.elastic_modulus / self.grip
 
-    def _member_frusta(self, diameter):
+    def _member_frusta(self, diameter, alpha_deg=30.0):
         """Build the frustum stack for Shigley's member-stiffness model.
 
-        The clamp zone is a pair of 30-degree cones spreading from each
-        washer face (dw = 1.5*d) toward the grip midplane. Each plate
-        segment between a face and the midplane is one frustum; a plate
+        The clamp zone is a pair of cones (half-angle ``alpha_deg``,
+        30 degrees by default) spreading from each washer face
+        (dw = 1.5*d) toward the grip midplane. Each plate segment
+        between a face and the midplane is one frustum; a plate
         straddling the midplane is split there.
 
         Args:
             diameter (float): Bolt nominal diameter in mm.
+            alpha_deg (float): Cone half-angle in degrees (default: 30,
+                Shigley's standard value).
 
         Returns:
             list: ``(thickness, small_diameter, elastic_modulus)`` per
@@ -420,6 +427,7 @@ class BoltedUnion(MechaElement):
         dw = 1.5 * diameter
         grip = self.grip
         mid = grip / 2
+        cone_factor = 2 * tan(radians(alpha_deg))
         frusta = []
 
         def add_half(layers):
@@ -429,7 +437,7 @@ class BoltedUnion(MechaElement):
                 if z >= mid:
                     break
                 t = min(thickness, mid - z)
-                small_d = dw + 1.155 * z  # cone at 30 degrees (2*tan30)
+                small_d = dw + cone_factor * z
                 modulus = get_material_properties(material)["elastic_modulus"] / 1e6
                 frusta.append((t, small_d, modulus))
                 z += thickness
@@ -438,17 +446,31 @@ class BoltedUnion(MechaElement):
         add_half(list(reversed(self.plates)))
         return frusta
 
-    def _member_stiffness_for(self, diameter):
-        """Member stiffness km in N/mm for a given bolt diameter."""
+    def _member_stiffness_for(self, diameter, alpha_deg=30.0):
+        """Member stiffness km in N/mm for a given bolt diameter.
+
+        Args:
+            diameter (float): Bolt nominal diameter in mm.
+            alpha_deg (float): Cone half-angle in degrees (default: 30,
+                Shigley's standard value); passed through to
+                :meth:`_member_frusta` so the frustum geometry and the
+                stiffness formula use the same angle.
+
+        Raises:
+            ValueError: If ``alpha_deg`` is not strictly between 0 and 90.
+        """
+        if not 0 < alpha_deg < 90:
+            raise ValueError("Cone half-angle must be strictly between 0 and 90 degrees")
+        tan_alpha = tan(radians(alpha_deg))
         total_compliance = 0.0
-        for t, small_d, modulus in self._member_frusta(diameter):
+        for t, small_d, modulus in self._member_frusta(diameter, alpha_deg):
             d = diameter
             ln_arg = (
-                (1.155 * t + small_d - d) * (small_d + d)
+                (2 * tan_alpha * t + small_d - d) * (small_d + d)
             ) / (
-                (1.155 * t + small_d + d) * (small_d - d)
+                (2 * tan_alpha * t + small_d + d) * (small_d - d)
             )
-            k = 0.5774 * pi * modulus * d / log(ln_arg)
+            k = tan_alpha * pi * modulus * d / log(ln_arg)
             total_compliance += 1 / k
         return 1 / total_compliance
 
@@ -456,15 +478,16 @@ class BoltedUnion(MechaElement):
     def member_stiffness(self):
         """float: Member stiffness km in N/mm (Shigley frustum cones).
 
-        Each plate contributes 30-degree frusta growing from the washer
-        faces (dw = 1.5*d) toward the grip midplane; the frusta act as
-        springs in series.
+        Each plate contributes frusta (half-angle :attr:`cone_angle_deg`,
+        30 degrees by default) growing from the washer faces
+        (dw = 1.5*d) toward the grip midplane; the frusta act as springs
+        in series.
 
         Raises:
             ValueError: If no plates are defined.
         """
         self._require_plates()
-        return self._member_stiffness_for(self.bolt.nominal_diameter)
+        return self._member_stiffness_for(self.bolt.nominal_diameter, self.cone_angle_deg)
 
     @property
     def joint_constant(self):
@@ -482,7 +505,7 @@ class BoltedUnion(MechaElement):
     def _joint_constant_for(self, bolt):
         """Joint constant C for a candidate bolt on the current plates."""
         kb = bolt.stress_area * bolt.elastic_modulus / self.grip
-        return kb / (kb + self._member_stiffness_for(bolt.nominal_diameter))
+        return kb / (kb + self._member_stiffness_for(bolt.nominal_diameter, self.cone_angle_deg))
 
     @property
     def effective_preload(self):

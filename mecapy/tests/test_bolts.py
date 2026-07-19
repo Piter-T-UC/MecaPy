@@ -1,6 +1,6 @@
 """Tests for bolt module."""
 
-from math import isclose, log, pi, sqrt
+from math import isclose, log, pi, radians, sqrt, tan
 
 import pytest
 
@@ -360,14 +360,16 @@ class TestBoltedUnionJoint:
         """Two identical steel plates: hand-checked frustum stiffness.
 
         d = 10, dw = 15, each half is one frustum with t = 20, D = 15:
-        ln argument = (23.1+5)*25 / ((23.1+25)*5) = 702.5/240.5,
-        k1 = 0.5774*pi*210000*10 / ln(702.5/240.5) ~= 3.5537e6 N/mm,
+        ln argument = (2*tan(30)*20+5)*25 / ((2*tan(30)*20+25)*5),
+        k1 = tan(30)*pi*210000*10 / ln(ln_arg) ~= 3.5537e6 N/mm,
         two in series -> km ~= 1.7769e6 N/mm.
         """
         union = BoltedUnion(Bolt("M10", 50.0), square_pattern(),
                             plates=steel_plates())
         assert union.grip == 40.0
-        expected_k1 = 0.5774 * pi * 210000.0 * 10.0 / log(702.5 / 240.5)
+        tan30 = tan(radians(30))
+        ln_arg = (2 * tan30 * 20.0 + 5.0) * 25.0 / ((2 * tan30 * 20.0 + 25.0) * 5.0)
+        expected_k1 = tan30 * pi * 210000.0 * 10.0 / log(ln_arg)
         assert isclose(union.member_stiffness, expected_k1 / 2, rel_tol=1e-9)
         assert isclose(union.member_stiffness, 1.7769e6, rel_tol=1e-3)
         # kb = As*E/grip = 58*210000/40
@@ -380,21 +382,22 @@ class TestBoltedUnionJoint:
         """Mixed stack split at the midplane: 3 frusta recomputed longhand.
 
         Plates: 10 mm steel + 30 mm aluminum, grip 40, midplane at 20.
-        Top half: steel t=10 D=15, aluminum t=10 D=15+1.155*10.
+        Top half: steel t=10 D=15, aluminum t=10 D=15+2*tan(30)*10.
         Bottom half: aluminum t=20 D=15.
         """
         union = BoltedUnion(Bolt("M10", 50.0), square_pattern(),
                             plates=[(10.0, "steel"), (30.0, "aluminum")])
         e_steel, e_alu = 210000.0, 69000.0  # database values in MPa
         d, dw = 10.0, 15.0
+        tan30 = tan(radians(30))
 
         def frustum_k(t, big_d, modulus):
-            ln_arg = ((1.155 * t + big_d - d) * (big_d + d)) / (
-                (1.155 * t + big_d + d) * (big_d - d))
-            return 0.5774 * pi * modulus * d / log(ln_arg)
+            ln_arg = ((2 * tan30 * t + big_d - d) * (big_d + d)) / (
+                (2 * tan30 * t + big_d + d) * (big_d - d))
+            return tan30 * pi * modulus * d / log(ln_arg)
 
         k1 = frustum_k(10.0, dw, e_steel)
-        k2 = frustum_k(10.0, dw + 1.155 * 10.0, e_alu)
+        k2 = frustum_k(10.0, dw + 2 * tan30 * 10.0, e_alu)
         k3 = frustum_k(20.0, dw, e_alu)
         expected_km = 1 / (1 / k1 + 1 / k2 + 1 / k3)
         assert isclose(union.member_stiffness, expected_km, rel_tol=1e-9)
