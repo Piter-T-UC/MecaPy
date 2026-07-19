@@ -2,6 +2,13 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Repository Layout
+
+The Python project lives in the **`MecaPy/`** subdirectory: package code in
+`MecaPy/mecapy/`, tests in `MecaPy/tests/`, plus `docs/`, `examples/` and the
+graphify graph (`MecaPy/graphify-out/`). Run all development commands from
+`MecaPy/`. Paths elsewhere in this document are relative to `MecaPy/`.
+
 ## Quick Start: Understanding the Codebase
 
 The fastest way to understand how things connect is via **graphify** — a knowledge graph built from the codebase:
@@ -20,11 +27,14 @@ The fastest way to understand how things connect is via **graphify** — a knowl
 /graphify .
 ```
 
-Open `graphify-out/graph.html` in your browser for an interactive visualization.
+Open `MecaPy/graphify-out/graph.html` in your browser for an interactive visualization.
 
 ## Commands
 
 ```bash
+# All commands run from the project directory
+cd MecaPy
+
 # Install (editable, with dev dependencies)
 pip install -e ".[dev]"
 
@@ -49,8 +59,8 @@ cd docs && make html   # open _build/html/index.html
 ```
 
 Note: `mecapy` is not installed in this environment by default — scripts run directly
-(e.g. `python examples/gear_design.py`) need `PYTHONPATH=.` unless `pip install -e .`
-has been run first.
+(e.g. `python examples/gear_design.py`) need `PYTHONPATH=.` (with `MecaPy/` as the
+working directory) unless `pip install -e .` has been run first.
 
 flake8 config: max line length 100, ignores E203/W503 (`setup.cfg`). mypy: Python 3.8 target,
 `disallow_untyped_defs = False` — the codebase does not use type annotations, relying on
@@ -73,6 +83,7 @@ MechaElement                              # material_properties, calculate_stres
 ├── Bolt (bolts/)                         # ISO metric: tension, preload, stiffness
 │   └── BoltedUnion (bolts/)              # joint: load distribution, separation, efficiency
 └── Weld (welds/)                         # weld bead stresses & material
+    └── WeldedUnion (welds/)              # weld group: combined loading, sizing, plots
 ```
 
 Because every element shares `MechaElement`, any of them can compute an axial stress
@@ -152,7 +163,14 @@ through `mecapy/materials.py` (`get_material_properties`, `get_available_materia
   - Implements AGMA 2101-D04 (metric) for cylindrical gears
   - Bending stress (Lewis + geometry factor) and pitting (Hertzian contact)
   - Digitized tables: Lewis Y, J geometry factors, material allowables, reliability factors
+  - Module-level factor functions in `agma.py`: `dynamic_factor`, `load_distribution_factor`,
+    `geometry_factor_I` (Norton's surface geometry factor), `elastic_coefficient`,
+    `bending_life_factor`, `contact_life_factor`, `temperature_factor`,
+    `hardness_ratio_factor`, `rim_thickness_factor`
   - Accepts explicit overrides to bypass table lookup
+- **Force reports** — every gear type (`Gear`, `BevelGear`, `Rack`, `Worm`, `WormWheel`)
+  has a `force_report(power_kw, speed_rpm, ...)` method returning the tangential /
+  radial / axial force breakdown at the mesh
 
 ### Bolts (`mecapy/bolts/`)
 **Purpose:** threaded fasteners & bolted joints.
@@ -165,6 +183,7 @@ through `mecapy/materials.py` (`get_material_properties`, `get_available_materia
   - Models load distribution across bolt group
   - Eccentric load handling (moment splitting)
   - Joint separation & slip safety factors
+  - `plot_distribution()` visualizes the per-bolt shear breakdown (matplotlib)
 
 ### Beams (`mecapy/beams/`)
 **Purpose:** static & dynamic analysis of bending members.
@@ -183,6 +202,18 @@ through `mecapy/materials.py` (`get_material_properties`, `get_available_materia
 - **`Wheel`** — base rotating member with inertia & stress
   - Rim stresses under centrifugal loading
   - Moment of inertia calculation
+
+### Welds (`mecapy/welds/`)
+**Purpose:** weld runs and weld groups under combined loading.
+
+- **`Weld`** — a single weld run with electrode material
+  - Electrode strengths from `electrode_data.py` (`ELECTRODES` table, `get_electrode()`)
+- **`WeldLine` / `WeldCircle`** (`geometry.py`) — weld path geometries; subclass `WeldPath` to add new shapes
+- **`WeldedUnion`** — weld group analysed by the elastic "weld as a line" method (Shigley Ch. 9)
+  - Group properties: centroid, unit second/polar moments, throat area
+  - `weld_stresses()` / `max_stress()` / `safety_factors()` sample the stress around the paths
+  - `required_size(safety_factor=..., apply=True)` sizes the weld leg for a target safety factor
+  - `plot_distribution()` renders the stress distribution (red-blue colormap, matplotlib)
 
 ### Units convention
 
