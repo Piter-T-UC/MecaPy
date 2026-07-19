@@ -131,3 +131,6 @@ dmypy.json
 # graphify knowledge-graph cache (regenerable via /graphify)
 graphify-out/
 .graphify_cache/
+
+# Claude Code local settings
+**/.claude/settings.local.json
