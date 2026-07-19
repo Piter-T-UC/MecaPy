@@ -2,5 +2,6 @@
 
 from . import constants
 from . import converters
+from . import thermal
 
-__all__ = ["constants", "converters"]
+__all__ = ["constants", "converters", "thermal"]

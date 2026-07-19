@@ -78,10 +78,20 @@ MechaElement                              # material_properties, calculate_stres
 ├── Shaft (shafts/)                       # + torsional_stress()
 │   └── PowerScrew (shafts/power_screw.py)  # lead screw: thread stresses, buckling, efficiency
 ├── Gear (gears/)                         # base gear geometry; see gear type hierarchy below
-├── Wheel (wheels/)                       # pulleys, sprockets, general rotating members
+├── Wheel (wheels/)                       # pulleys, sprockets; + moment_of_inertia, kinetic_energy
+│   └── Flywheel (wheels/flywheel.py)     # energy fluctuation sizing, rotating-disc stresses (SI)
 ├── Bearing (bearings/)                   # rolling contact stress & life
 ├── Bolt (bolts/)                         # ISO metric: tension, preload, stiffness
 │   └── BoltedUnion (bolts/)              # joint: load distribution, separation, efficiency
+├── AxialFrictionInterface (clutches/)    # annular friction math: uniform pressure & uniform wear
+│   ├── DiscClutch                        # flat disc (= full-annulus disc brake, alias DiscBrake)
+│   └── ConeClutch                        # wedging cone, 1/sin(alpha) torque amplification
+├── CentrifugalClutch (clutches/)         # spring-retained shoes, engagement speed, T(omega)
+├── InternalShoeBrake / ExternalShoeBrake (brakes/shoe.py)  # pivoted long shoe (Shigley 16-2..16-8)
+├── BandBrake (brakes/band.py)            # e^(mu*phi) tension ratio, band stress
+├── CaliperDiscBrake (brakes/disc.py)     # annular-sector pads, both wear theories
+├── FlangeCoupling (couplings/)           # rigid: bolt/key/flange checks, torque_capacity()
+├── FlexibleCoupling (couplings/)         # catalog-style: torque/speed/misalignment ratings
 └── Weld (welds/)                         # weld bead stresses & material
     └── WeldedUnion (welds/)              # weld group: combined loading, sizing, plots
 ```
@@ -214,6 +224,70 @@ through `mecapy/materials.py` (`get_material_properties`, `get_available_materia
   - `weld_stresses()` / `max_stress()` / `safety_factors()` sample the stress around the paths
   - `required_size(safety_factor=..., apply=True)` sizes the weld leg for a target safety factor
   - `plot_distribution()` renders the stress distribution (red-blue colormap, matplotlib)
+
+### Clutches (`mecapy/clutches/`)
+**Purpose:** friction couplings (Shigley Ch. 16). mm / N / N*mm / MPa convention.
+
+- **`AxialFrictionInterface`** — shared annular friction math, parameterized by half-cone
+  angle (90° = flat disc; cone torque scales by 1/sin(alpha))
+  - Both theories always available as method pairs — no mode flag:
+    `torque_uniform_wear(F)` / `torque_uniform_pressure(F)`, force/pressure inversions
+  - **Vocabulary rule:** `p_max` args = uniform-WEAR theory (pressure peaks at the inner
+    radius); `pressure` args = uniform-PRESSURE theory. Never conflate them.
+  - Accepts explicit `mu` OR `lining="molded"` (lining supplies mu default and enables
+    `pressure_safety_factor()` against the lining's p_max; explicit `mu` wins)
+- **`DiscClutch`** — flat disc; `optimal_inner_diameter` (d = D/sqrt(3)); doubles as the
+  full-annulus disc brake (re-exported as `mecapy.brakes.DiscBrake`)
+- **`ConeClutch`** — cone_angle in (0, 45]; `is_self_holding` (tan alpha < mu), `face_width`
+- **`CentrifugalClutch`** — engagement speed sqrt(S/(m*r_g)), torque grows with omega^2
+- **`friction_data.py`** — `FRICTION_MATERIALS` lining table (mu dry/oil, p_max MPa,
+  t_max °C) + `get_friction_material()`, mirroring the `*_data.py` accessor pattern
+
+### Brakes (`mecapy/brakes/`)
+**Purpose:** friction stopping elements. Reuses the clutch friction core.
+
+- **`InternalShoeBrake` / `ExternalShoeBrake`** — pivoted long shoe (Shigley Eqs. 16-2..16-8)
+  - `rotation="self_energizing"` / `"de_energizing"` selects the Mf sign branch
+  - `moment_friction/moment_normal/actuating_force/torque(p_max)`, inversions
+    `max_pressure_for_force()` / `torque_for_force()` (how the secondary shoe of a
+    two-shoe brake is solved at the shared actuating force)
+  - `is_self_locking` / `self_locking_margin` (MN/Mf, pressure-independent);
+    `hinge_reactions()` in the Fig. 16-7 shoe frame
+  - Validated against Shigley Ex. 16-2 (F ≈ 2.28 kN, total T ≈ 528 N*m)
+- **`BandBrake`** — `tension_ratio` = e^(mu*phi), torque/tension/pressure round-trips,
+  `band_stress()` + `band_safety_factor()` (needs `band_thickness`)
+- **`CaliperDiscBrake`** — annular-sector pads, effective radius per theory
+- **`DiscBrake`** — alias of `DiscClutch` (full-annulus disc brake IS a disc clutch)
+
+### Couplings (`mecapy/couplings/`)
+**Purpose:** shaft-to-shaft connections.
+
+- **`FlangeCoupling`** — rigid: bolt shear (0.577*Sy), flange bearing, hub-flange shear,
+  key shear/bearing checks; `torque_capacity(safety_factor=...)` returns the weakest-mode
+  torque (skips checks whose geometry wasn't given)
+- **`FlexibleCoupling`** — catalog-style ratings: torque/speed safety factors,
+  `check_misalignment()` / `validate_misalignment()` (angular/parallel/axial),
+  torsional windup (needs `torsional_stiffness`)
+
+### Flywheels (`mecapy/wheels/flywheel.py`)
+**Purpose:** rotational energy storage (Shigley Sec. 16-12). **SI units** (m, kg, Pa) —
+extends the SI-era `Wheel`, which now has `moment_of_inertia` and `kinetic_energy(omega)`.
+
+- Sizing: `Flywheel.required_inertia(Ue, Cs, omega_avg)` (staticmethod, works before a
+  geometry exists), `energy_fluctuation()`, `coefficient_of_fluctuation()`, `speed_swing()`
+- Stresses: full rotating annular/solid-disc `tangential_stress()` / `radial_stress()`
+  (Shigley Eq. 3-55), `rim_hoop_stress()` quick check, `burst_safety_factor()`,
+  `max_speed()` / `max_speed_rpm()`
+
+### Thermal helpers (`mecapy/utils/thermal.py`)
+**Purpose:** clutch/brake energy and temperature rise (Shigley Secs. 16-8/16-9). Pure SI.
+
+- `stop_energy(I, w1, w2)`, `clutch_slip_energy(I1, I2, w1, w2)` (two-inertia engagement),
+  `engagement_time(...)`, `temperature_rise(E, m, specific_heat= | material=)`,
+  `cooling_time_constant()` + `newton_cooling_temperature()` (Newton cooling decay),
+  `interface_power(T, w)`, `pv_value(p, V)`
+- `MATERIALS` entries now include `specific_heat` (J/(kg*K)) for the material= lookup
+- Bridge from geometry modules: torque N*mm -> N*m is /1e3 (done once in clutch `.power()`)
 
 ### Units convention
 

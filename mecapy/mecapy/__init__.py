@@ -3,12 +3,15 @@ MecaPy - Python library for mechanical engineering calculations.
 
 A comprehensive library for analyzing and designing mechanical elements including:
 - Beams
-- Wheels
+- Wheels and flywheels
 - Gears
 - Bearings
 - Bolts
 - Welds
 - Shafts
+- Clutches
+- Brakes
+- Couplings
 - And other mechanical components
 """
 
@@ -24,6 +27,9 @@ from . import bearings
 from . import bolts
 from . import welds
 from . import shafts
+from . import clutches
+from . import brakes
+from . import couplings
 from . import utils
 
 __all__ = [
@@ -35,5 +41,8 @@ __all__ = [
     "bolts",
     "welds",
     "shafts",
+    "clutches",
+    "brakes",
+    "couplings",
     "utils",
 ]

@@ -34,3 +34,27 @@ def sample_shaft():
     """Fixture providing a sample shaft object."""
     from mecapy.shafts import Shaft
     return Shaft(diameter=25.0, length=500.0, material="steel")
+
+
+@pytest.fixture
+def sample_disc_clutch():
+    """Fixture providing a sample disc clutch object."""
+    from mecapy.clutches import DiscClutch
+    return DiscClutch(outer_diameter=300, inner_diameter=225, mu=0.25, n_faces=2)
+
+
+@pytest.fixture
+def sample_internal_shoe_brake():
+    """Fixture providing the Shigley Ex. 16-2 internal shoe brake."""
+    import math
+    from mecapy.brakes import InternalShoeBrake
+    return InternalShoeBrake(drum_radius=150, face_width=32,
+                             pivot_distance=math.sqrt(112 ** 2 + 50 ** 2),
+                             theta1=0, theta2=126, actuation_arm=212, mu=0.32)
+
+
+@pytest.fixture
+def sample_flywheel():
+    """Fixture providing a sample flywheel object."""
+    from mecapy.wheels import Flywheel
+    return Flywheel(outer_radius=0.3, thickness=0.05, material="steel")
