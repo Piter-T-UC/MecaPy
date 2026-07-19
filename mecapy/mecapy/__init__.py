@@ -12,6 +12,8 @@ A comprehensive library for analyzing and designing mechanical elements includin
 - Clutches
 - Brakes
 - Couplings
+- Belts (flat and V)
+- Roller chains
 - And other mechanical components
 """
 
@@ -30,6 +32,8 @@ from . import shafts
 from . import clutches
 from . import brakes
 from . import couplings
+from . import belts
+from . import chains
 from . import utils
 
 __all__ = [
@@ -44,5 +48,7 @@ __all__ = [
     "clutches",
     "brakes",
     "couplings",
+    "belts",
+    "chains",
     "utils",
 ]

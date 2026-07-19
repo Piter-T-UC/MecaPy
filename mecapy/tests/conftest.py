@@ -58,3 +58,28 @@ def sample_flywheel():
     """Fixture providing a sample flywheel object."""
     from mecapy.wheels import Flywheel
     return Flywheel(outer_radius=0.3, thickness=0.05, material="steel")
+
+
+@pytest.fixture
+def sample_flat_belt():
+    """Fixture providing a sample flat belt object."""
+    from mecapy.belts import FlatBelt
+    return FlatBelt(width=50.0, thickness=5.0, driver_diameter=100.0,
+                    driven_diameter=300.0, center_distance=800.0,
+                    belt_material="polyamide")
+
+
+@pytest.fixture
+def sample_v_belt():
+    """Fixture providing a sample V-belt object."""
+    from mecapy.belts import VBelt
+    return VBelt(section="B", driver_diameter=150.0, driven_diameter=300.0,
+                center_distance=600.0)
+
+
+@pytest.fixture
+def sample_roller_chain():
+    """Fixture providing a sample roller chain object."""
+    from mecapy.chains import RollerChain
+    return RollerChain(chain_number=60, driver_teeth=17, driven_teeth=51,
+                       center_distance=500.0)
