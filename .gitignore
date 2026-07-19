@@ -127,3 +127,7 @@ dmypy.json
 *.swo
 *~
 .DS_Store
+
+# graphify knowledge-graph cache (regenerable via /graphify)
+graphify-out/
+.graphify_cache/

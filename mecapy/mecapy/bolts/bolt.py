@@ -9,7 +9,13 @@ classes in :mod:`mecapy.bolts.thread_data`.
 from math import pi
 
 from ..base import MechaElement
-from .thread_data import get_property_class, get_thread
+from .thread_data import (
+    SHIGLEY_MINOR_COEFF,
+    SHIGLEY_PITCH_COEFF,
+    get_property_class,
+    get_thread,
+    shigley_thread_geometry,
+)
 
 
 class Bolt(MechaElement):
@@ -22,34 +28,90 @@ class Bolt(MechaElement):
     from :class:`~mecapy.base.MechaElement`; the elastic modulus used for
     stiffness and elongation comes from the element material.
 
+    Bolts outside the coarse table (fine series, custom pitches) can be
+    built from an explicit ``diameter`` and ``pitch`` instead of a
+    ``size``; their stress area is then computed with Shigley's formulas
+    (mean of pitch and minor diameters). The same formula can be forced
+    on a table size with ``stress_area_method="shigley"``:
+
+        Bolt(size="M10", length=50)                     # table area
+        Bolt(size="M10", length=50, stress_area_method="shigley")
+        Bolt(length=50, diameter=12, pitch=1.25)        # fine thread
+
     Attributes:
-        size (str): Thread designation, e.g. "M10".
+        size (str): Thread designation, e.g. "M10" (custom bolts get a
+            synthesized "M<d>x<p>" designation).
         length (float): Bolt length (grip length) in mm.
         property_class (str): ISO 898-1 property class, e.g. "8.8".
         material (str): Material type (used for elastic modulus).
+        stress_area_method (str): "table" or "shigley" — source of
+            :attr:`stress_area`.
     """
 
-    def __init__(self, size, length, property_class="8.8", material="steel", name=None):
+    def __init__(self, size=None, length=None, property_class="8.8", material="steel",
+                 name=None, diameter=None, pitch=None, stress_area_method=None):
         """
         Initialize a Bolt object.
 
         Args:
-            size (str): ISO thread designation (e.g. "M10").
-            length (float): Bolt length (grip length) in mm.
+            size (str): ISO thread designation (e.g. "M10"). Mutually
+                exclusive with ``diameter``/``pitch``.
+            length (float): Bolt length (grip length) in mm. Required.
             property_class (str): ISO 898-1 property class (default: "8.8").
             material (str): Material type (default: "steel").
             name (str): Optional identifier for the bolt.
+            diameter (float): Nominal thread diameter in mm for a custom
+                (non-table) bolt. Requires ``pitch``.
+            pitch (float): Thread pitch in mm for a custom bolt.
+                Requires ``diameter``.
+            stress_area_method (str): "table" (default for table sizes)
+                or "shigley" to compute the stress area with Shigley's
+                formulas. Custom bolts always use "shigley".
 
         Raises:
             ValueError: If the thread size or property class is unknown,
-                or if ``length`` is not strictly positive.
+                the size/diameter/pitch combination is inconsistent, or
+                ``length`` is missing or not strictly positive.
         """
         super().__init__(name=name, material=material)
-        self._thread = get_thread(size)
+        if stress_area_method not in (None, "table", "shigley"):
+            raise ValueError(
+                f"Unknown stress_area_method {stress_area_method!r}. "
+                "Valid values: 'table', 'shigley'"
+            )
+        if size is not None:
+            if diameter is not None or pitch is not None:
+                raise ValueError(
+                    "Provide either a table size or diameter and pitch, not both"
+                )
+            self._thread = dict(get_thread(size))
+            if stress_area_method == "shigley":
+                geometry = shigley_thread_geometry(
+                    self._thread["nominal_diameter"], self._thread["pitch"]
+                )
+                self._thread["stress_area"] = geometry["stress_area"]
+            self.stress_area_method = stress_area_method or "table"
+            self.size = size
+        elif diameter is not None and pitch is not None:
+            if stress_area_method == "table":
+                raise ValueError(
+                    "stress_area_method='table' requires a table size "
+                    "(e.g. 'M10'), not a custom diameter and pitch"
+                )
+            self._thread = shigley_thread_geometry(diameter, pitch)
+            self.stress_area_method = "shigley"
+            self.size = f"M{diameter:g}x{pitch:g}"
+        elif diameter is not None or pitch is not None:
+            raise ValueError("Custom bolts require both diameter and pitch")
+        else:
+            raise ValueError(
+                "Provide a thread size (e.g. 'M10') or diameter and pitch"
+            )
         self._strength = get_property_class(property_class)
+        if length is None:
+            raise ValueError("Bolt length must be provided")
         if length <= 0:
             raise ValueError("Bolt length must be strictly positive")
-        self.size = size
         self.length = length
         self.property_class = property_class
 
@@ -71,11 +133,23 @@ class Bolt(MechaElement):
         return self._thread["pitch"]
 
     @property
+    def minor_diameter(self):
+        """float: Minor (root) diameter d_r = d - 1.226869*p in mm (Shigley)."""
+        return self.nominal_diameter - SHIGLEY_MINOR_COEFF * self.pitch
+
+    @property
+    def pitch_diameter(self):
+        """float: Pitch diameter d_p = d - 0.649519*p in mm (Shigley)."""
+        return self.nominal_diameter - SHIGLEY_PITCH_COEFF * self.pitch
+
+    @property
     def stress_area(self):
-        """float: Tensile stress area As in mm^2 (ISO 898-1).
+        """float: Tensile stress area As in mm^2.
 
         This is the effective area resisting tension in the threaded
-        portion, smaller than the nominal shank area.
+        portion, smaller than the nominal shank area. Source depends on
+        :attr:`stress_area_method`: the ISO 898-1 table ("table") or
+        Shigley's formula At = (pi/4)*((d_p + d_r)/2)^2 ("shigley").
         """
         return self._thread["stress_area"]
 

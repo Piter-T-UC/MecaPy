@@ -1,9 +1,18 @@
 """ISO metric thread and bolt property-class data.
 
 Tabulated values for ISO metric coarse threads (ISO 262 / ISO 724) and
-bolt property classes (ISO 898-1). Units: mm for dimensions, mm^2 for
-areas, MPa for strengths.
+bolt property classes (ISO 898-1), plus Shigley's closed-form thread
+geometry for threads not in the table (fine series, custom pitches).
+Units: mm for dimensions, mm^2 for areas, MPa for strengths.
 """
+
+from math import pi
+
+# Shigley's approximations for ISO 60-degree threads (Shigley, Table 8-1):
+#   minor diameter  d_r = d - 1.226869 * p
+#   pitch diameter  d_p = d - 0.649519 * p
+SHIGLEY_MINOR_COEFF = 1.226869
+SHIGLEY_PITCH_COEFF = 0.649519
 
 # ISO metric coarse threads: nominal diameter (mm), pitch (mm) and
 # tensile stress area As (mm^2) per ISO 898-1 tabulated values.
@@ -57,6 +66,77 @@ def get_thread(size):
         available = ", ".join(ISO_COARSE_THREADS.keys())
         raise ValueError(f"Unknown thread size {size!r}. Available sizes: {available}")
     return ISO_COARSE_THREADS[size]
+
+
+def get_pitch(size):
+    """
+    Look up the ISO coarse thread pitch for a size or nominal diameter.
+
+    Args:
+        size (str or float): Thread designation (e.g. "M10") or nominal
+            diameter in mm (e.g. 10).
+
+    Returns:
+        float: Thread pitch in mm (ISO coarse series).
+
+    Raises:
+        ValueError: If no ISO coarse thread matches ``size``.
+    """
+    if isinstance(size, str):
+        return get_thread(size)["pitch"]
+    diameter = float(size)
+    for data in ISO_COARSE_THREADS.values():
+        if data["nominal_diameter"] == diameter:
+            return data["pitch"]
+    available = ", ".join(ISO_COARSE_THREADS.keys())
+    raise ValueError(
+        f"No ISO coarse thread with nominal diameter {size!r} mm. "
+        f"Available sizes: {available}"
+    )
+
+
+def shigley_thread_geometry(diameter, pitch):
+    """
+    Compute thread geometry with Shigley's formulas.
+
+    Uses the approximations for ISO 60-degree threads:
+    d_r = d - 1.226869*p, d_p = d - 0.649519*p and the tensile stress
+    area At = (pi/4) * ((d_p + d_r)/2)^2 on the mean of the pitch and
+    minor diameters. Intended for threads not in the coarse table
+    (fine series, custom pitches).
+
+    Args:
+        diameter (float): Nominal (major) thread diameter in mm.
+        pitch (float): Thread pitch in mm.
+
+    Returns:
+        dict: ``nominal_diameter``, ``pitch``, ``minor_diameter``,
+        ``pitch_diameter`` (mm) and ``stress_area`` (mm^2).
+
+    Raises:
+        ValueError: If ``diameter`` or ``pitch`` is not strictly
+            positive, or the pitch is so large that the minor diameter
+            would be non-positive.
+    """
+    if diameter <= 0:
+        raise ValueError("Thread diameter must be strictly positive")
+    if pitch <= 0:
+        raise ValueError("Thread pitch must be strictly positive")
+    minor_diameter = diameter - SHIGLEY_MINOR_COEFF * pitch
+    pitch_diameter = diameter - SHIGLEY_PITCH_COEFF * pitch
+    if minor_diameter <= 0:
+        raise ValueError(
+            f"Pitch {pitch} mm is too large for diameter {diameter} mm: "
+            "minor diameter would be non-positive"
+        )
+    stress_area = pi / 4 * ((pitch_diameter + minor_diameter) / 2) ** 2
+    return {
+        "nominal_diameter": float(diameter),
+        "pitch": float(pitch),
+        "minor_diameter": minor_diameter,
+        "pitch_diameter": pitch_diameter,
+        "stress_area": stress_area,
+    }
 
 
 def get_property_class(property_class):

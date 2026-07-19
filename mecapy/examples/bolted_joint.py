@@ -40,7 +40,7 @@ def main():
     union = BoltedUnion(
         bolt,
         positions,
-        forces=(8000.0, 2000.0, 12000.0),      # N: in-plane shear + axial
+        forces=(3000.0, 2000.0, 12000.0),      # N: in-plane shear + axial
         moments=(4e5, -2e5, 8e5),              # N*mm: bending Mx, My + torsion Mz
     )
     print("\n" + "=" * 60)

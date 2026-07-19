@@ -188,6 +188,7 @@ def main():
         fig = box_union.plot_distribution(n=24, show=False)
         print("Stress distribution plot created (showing box joint example)")
         print("Use plt.show() to display the plot interactively")
+        #plt.show()
         plt.close(fig)
     except ImportError:
         print("(matplotlib not installed - skipping stress distribution plot)")
