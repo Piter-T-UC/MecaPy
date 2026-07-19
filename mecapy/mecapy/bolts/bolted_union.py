@@ -12,7 +12,7 @@ Load convention (right-handed axes, z out of the joint plane):
     - All loads act at the centroid of the bolt group.
 """
 
-from math import log, pi, sqrt
+from math import copysign, log, pi, sqrt
 
 from ..base import MechaElement
 from ..materials import get_material_properties
@@ -104,6 +104,7 @@ class BoltedUnion(MechaElement):
         self.moments = tuple(float(m) for m in moments)
         self.plates = None
         self.preload = None
+        self._centroid_override = None
         self.set_plates(plates)
         self.set_preload(preload)
 
@@ -216,11 +217,37 @@ class BoltedUnion(MechaElement):
         """tuple: Centroid (x, y) of the bolt group in mm.
 
         Simple average of the positions — all bolts have equal area.
+        Assign to this property to override the analysis point (e.g. a
+        known center of rigidity); assign None to fall back to the
+        computed average again.
         """
+        if self._centroid_override is not None:
+            return self._centroid_override
         n = self.n_bolts
         x_bar = sum(row[1] for row in self.positions) / n
         y_bar = sum(row[2] for row in self.positions) / n
         return (x_bar, y_bar)
+
+    @centroid.setter
+    def centroid(self, point):
+        """
+        Override the point loads/moments are applied about and shear is
+        measured from, instead of the computed geometric average.
+
+        Args:
+            point (tuple): (x, y) in mm, or None to remove the override
+                and go back to the computed centroid.
+
+        Raises:
+            ValueError: If ``point`` is not None and does not have
+                exactly 2 numeric components.
+        """
+        if point is None:
+            self._centroid_override = None
+            return
+        if len(point) != 2:
+            raise ValueError(f"centroid must be (x, y); got {list(point)!r}")
+        self._centroid_override = (float(point[0]), float(point[1]))
 
     def _relative_coords(self):
         """Return [(number, dx, dy)] with coordinates relative to the centroid."""
@@ -735,9 +762,12 @@ class BoltedUnion(MechaElement):
         cross.
 
         Args:
-            scale (float): Arrow scale in mm per N. If None, the largest
-                shear component is auto-scaled to about 20% of the plot
-                span.
+            scale (float): Arrow scale in mm per N, applied linearly. If
+                None (default), the largest shear component/magnitude is
+                scaled to about 20% of the plot span and smaller ones
+                follow a square-root compression instead of a straight
+                linear one, so they stay visible instead of shrinking
+                toward zero next to a much larger force.
             show (bool): Call ``plt.show()`` (default: True). Pass False
                 when embedding or testing.
             ax (matplotlib.axes.Axes): Axes to draw on. If None, a new
@@ -767,14 +797,34 @@ class BoltedUnion(MechaElement):
             fig = ax.figure
 
         span = max(max(xs) - min(xs), max(ys) - min(ys)) or 1.0
-        if scale is None:
-            max_component = max(
-                (abs(c) for entry in forces.values()
-                 for pair in (entry["shear_direct"], entry["shear_torsion"])
-                 for c in pair),
-                default=0.0,
-            )
-            scale = 0.2 * span / max_component if max_component > 0 else 1.0
+        max_component = max(
+            (abs(c) for entry in forces.values()
+             for pair in (entry["shear_direct"], entry["shear_torsion"])
+             for c in pair),
+            default=0.0,
+        )
+        max_component = max(
+            max_component,
+            max((entry["shear_magnitude"] for entry in forces.values()), default=0.0),
+        )
+        target_length = 0.2 * span
+
+        def arrow_offset(value):
+            """Signed on-plot length (mm) for a force component/magnitude.
+
+            With the auto scale (``scale`` argument left as None), uses a
+            square-root compression of the magnitude instead of a straight
+            linear one, so a small component next to a much larger one is
+            still visibly drawn instead of shrinking toward zero; the
+            largest component still maps to ``target_length`` either way.
+            An explicit ``scale`` (mm/N) bypasses this and stays linear,
+            since the caller asked for that specific rate.
+            """
+            if value == 0 or max_component == 0:
+                return 0.0
+            if scale is not None:
+                return value * scale
+            return copysign(sqrt(abs(value) / max_component) * target_length, value)
 
         marker_size = 100
         ax.scatter(xs, ys, s=marker_size, color="#374151", zorder=3, label="Bolts")
@@ -790,15 +840,8 @@ class BoltedUnion(MechaElement):
         fig.canvas.draw()
         ax.autoscale(False)
 
-        # Bolt marker radius converted from points (screen space, scatter's
-        # native unit) to data units (mm), so the component-arrow origins
-        # below can be nudged just enough to stay inside the scatter dot
-        # instead of floating next to it regardless of the plot's scale.
-        marker_radius_px = sqrt(marker_size / pi) * fig.dpi / 72.0
-        px_per_unit = abs(
-            ax.transData.transform((1, 0))[0] - ax.transData.transform((0, 0))[0]
-        ) or 1.0
-        origin_shift = 0.7 * marker_radius_px / px_per_unit
+        # Arrow origins are not nudged away from the bolt marker (disabled).
+        origin_shift = 0
 
         direct_color = "#3c25eb"
         torsion_color = "#d90b0b"
@@ -814,7 +857,7 @@ class BoltedUnion(MechaElement):
             if value == 0:
                 return
             base = (x + base_shift[0], y + base_shift[1])
-            tip = (base[0] + cx * scale, base[1] + cy * scale)
+            tip = (base[0] + arrow_offset(cx), base[1] + arrow_offset(cy))
             ax.annotate(
                 "", xy=tip, xytext=base,
                 arrowprops={"arrowstyle": "-|>", "color": color,
@@ -856,9 +899,16 @@ class BoltedUnion(MechaElement):
             # component: with a single active component it is identical
             # (same direction and magnitude) to the arrow already drawn
             # for it, so overlaying it just doubles the arrowhead.
-            if entry["shear_magnitude"] > 0 and nonzero_components > 1:
+            shear_mag = entry["shear_magnitude"]
+            if shear_mag > 0 and nonzero_components > 1:
+                # Scale by magnitude and reapply the true unit direction,
+                # rather than offsetting fsx/fsy separately, since the
+                # square-root compression is not linear (it would distort
+                # the resultant's angle if applied per axis).
+                length = arrow_offset(shear_mag)
+                ux, uy = fsx / shear_mag, fsy / shear_mag
                 ax.annotate(
-                    "", xy=(x + fsx * scale, y + fsy * scale), xytext=(x, y),
+                    "", xy=(x + ux * length, y + uy * length), xytext=(x, y),
                     arrowprops={"arrowstyle": "-|>", "color": "#9ca3af",
                                 "linewidth": 1, "linestyle": "--",
                                 "mutation_scale": 10},
