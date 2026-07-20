@@ -22,6 +22,8 @@ __author__ = "Piter-T-UC"
 __license__ = "MIT"
 
 from .base import MechaElement
+from .materials import Material
+from . import materials
 from . import beams
 from . import wheels
 from . import gears
@@ -38,6 +40,8 @@ from . import utils
 
 __all__ = [
     "MechaElement",
+    "Material",
+    "materials",
     "beams",
     "wheels",
     "gears",

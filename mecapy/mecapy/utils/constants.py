@@ -12,6 +12,7 @@ MATERIALS = {
         "elastic_modulus": 210e9,  # Pa
         "poisson_ratio": 0.3,
         "yield_strength": 250e6,  # Pa (typical mild steel)
+        "ultimate_strength": 400e6,  # Pa (typical mild steel, A36-like)
         "shear_modulus": 81e9,  # Pa
         "specific_heat": 500,  # J/(kg*K)
     },
@@ -20,6 +21,7 @@ MATERIALS = {
         "elastic_modulus": 69e9,  # Pa
         "poisson_ratio": 0.33,
         "yield_strength": 110e6,  # Pa (typical aluminum)
+        "ultimate_strength": 200e6,  # Pa
         "shear_modulus": 26e9,  # Pa
         "specific_heat": 900,  # J/(kg*K)
     },
@@ -28,6 +30,7 @@ MATERIALS = {
         "elastic_modulus": 110e9,  # Pa
         "poisson_ratio": 0.34,
         "yield_strength": 200e6,  # Pa
+        "ultimate_strength": 250e6,  # Pa
         "shear_modulus": 42e9,  # Pa
         "specific_heat": 385,  # J/(kg*K)
     },
@@ -36,6 +39,7 @@ MATERIALS = {
         "elastic_modulus": 160e9,  # Pa
         "poisson_ratio": 0.25,
         "yield_strength": 180e6,  # Pa
+        "ultimate_strength": 250e6,  # Pa (gray iron, tensile)
         "shear_modulus": 64e9,  # Pa
         "specific_heat": 500,  # J/(kg*K)
     },
@@ -44,6 +48,7 @@ MATERIALS = {
         "elastic_modulus": 110e9,  # Pa
         "poisson_ratio": 0.34,
         "yield_strength": 170e6,  # Pa (typical gear bronze, e.g. C90700)
+        "ultimate_strength": 300e6,  # Pa (C90700-like)
         "shear_modulus": 41e9,  # Pa
         "specific_heat": 380,  # J/(kg*K)
     },
