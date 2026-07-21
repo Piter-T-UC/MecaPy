@@ -9,8 +9,11 @@ factors to 1%.
 """
 
 import pytest
-from mecapy.gears import SpurGear, HelicalGear, Rack, AGMARating
+from mecapy.gears import (
+    SpurGear, HelicalGear, Rack, AGMARating, GearMaterial,
+)
 from mecapy.gears import agma, agma_data
+from mecapy.materials import Material
 
 
 class TestFactors:
@@ -239,3 +242,81 @@ class TestRatingValidation:
         spur_zi = agma.geometry_factor_I(SpurGear(20, module=3.0),
                                          SpurGear(60, module=3.0))
         assert rating.ZI > spur_zi
+
+
+class TestGearMaterial:
+    """A Material subclass carrying Brinell hardness and AGMA grade."""
+
+    def test_construction_and_defaults(self):
+        """Hardness and grade are stored; grade defaults to 1."""
+        m = GearMaterial(hardness_HB=240)
+        assert m.hardness_HB == 240
+        assert m.grade == 1
+        assert isinstance(m, Material)   # base.py stress/safety dispatch
+
+    def test_forwards_material_kwargs(self):
+        """Extra kwargs flow through to the Material constructor."""
+        m = GearMaterial(240, base_material="steel", yield_strength=600,
+                         ultimate_strength=900, name="alloy")
+        assert m.yield_strength == 600
+        assert m.name == "alloy"
+        assert m.properties_si["yield_strength"] == 600e6
+
+    def test_allowables_match_agma_data(self):
+        """St/Sc properties equal the agma_data through-hardened fits."""
+        m = GearMaterial(240, grade=2)
+        assert m.allowable_bending_stress == pytest.approx(
+            agma_data.allowable_bending_stress(240, 2))
+        assert m.allowable_contact_stress == pytest.approx(
+            agma_data.allowable_contact_stress(240, 2))
+
+    def test_recompute_on_hardness_change(self):
+        """Changing the hardness updates the derived allowables."""
+        m = GearMaterial(240, grade=1)
+        before = m.allowable_bending_stress
+        m.hardness_HB = 300
+        assert m.allowable_bending_stress > before
+        assert m.allowable_bending_stress == pytest.approx(
+            agma_data.allowable_bending_stress(300, 1))
+
+    def test_invalid_hardness(self):
+        with pytest.raises(ValueError):
+            GearMaterial(hardness_HB=0)
+        m = GearMaterial(240)
+        with pytest.raises(ValueError):
+            m.hardness_HB = -10
+
+    def test_invalid_grade(self):
+        with pytest.raises(ValueError):
+            GearMaterial(240, grade=3)
+
+    def test_agma_pulls_hardness_and_grade(self):
+        """AGMARating reads hardness/grade off the gear materials."""
+        pinion = SpurGear(20, module=3.0, face_width=40.0,
+                          material=GearMaterial(240, grade=1))
+        gear = SpurGear(60, module=3.0, face_width=40.0,
+                        material=GearMaterial(200, grade=1))
+        auto = AGMARating(pinion, gear, power_kw=10.0, pinion_speed_rpm=1200)
+        explicit = AGMARating(pinion, gear, power_kw=10.0,
+                              pinion_speed_rpm=1200, hardness_HB=240,
+                              gear_hardness_HB=200, grade=1)
+        assert auto.St == pytest.approx(explicit.St)
+        assert auto.Sc == pytest.approx(explicit.Sc)
+        assert auto.ZW == pytest.approx(explicit.ZW)
+        assert auto.ZW > 1.0   # 240/200 hardness ratio enables ZW
+
+    def test_explicit_hardness_overrides_material(self):
+        """An explicit hardness_HB still wins over the material's value."""
+        pinion = SpurGear(20, module=3.0, face_width=40.0,
+                          material=GearMaterial(240, grade=1))
+        gear = SpurGear(60, module=3.0, face_width=40.0)
+        r = AGMARating(pinion, gear, power_kw=10.0, pinion_speed_rpm=1200,
+                       hardness_HB=300)
+        assert r.St == pytest.approx(agma_data.allowable_bending_stress(300, 1))
+
+    def test_string_material_still_requires_hardness(self):
+        """A plain string material has no hardness to fall back on."""
+        pinion = SpurGear(20, module=3.0, face_width=40.0, material="steel")
+        gear = SpurGear(60, module=3.0, face_width=40.0)
+        with pytest.raises(ValueError):
+            AGMARating(pinion, gear, power_kw=10.0, pinion_speed_rpm=1200)

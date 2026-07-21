@@ -21,6 +21,7 @@ AGMA formulations differ); see :mod:`mecapy.gears.bevel` and
 import math
 
 from . import agma_data
+from .material import GearMaterial
 from .rack import Rack
 
 
@@ -248,9 +249,9 @@ def contact_life_factor(cycles=1e7):
     """
     if cycles <= 0:
         raise ValueError("Cycle count must be strictly positive")
-    elif cycles <1e4:
+    elif cycles < 1e4:
         return 1.5
-    elif cycles<1e7:
+    elif cycles < 1e7:
         return 2.466 * cycles ** -0.056
     return 1.4488 * cycles ** -0.023
 
@@ -369,12 +370,18 @@ class AGMARating:
             reliability (float): Survival probability for YZ
                 (default 0.99).
             grade (int): AGMA steel grade for the allowable-stress fits
-                (default 1).
+                (default 1). Ignored when the hardness is taken from a
+                :class:`~mecapy.gears.GearMaterial`, which supplies its
+                own grade.
             hardness_HB (float): Brinell hardness for the through-
                 hardened allowable-stress fits. Give this OR explicit
-                ``St``/``Sc``.
+                ``St``/``Sc``. Defaults to the pinion material's
+                ``hardness_HB`` when it is a
+                :class:`~mecapy.gears.GearMaterial`.
             gear_hardness_HB (float): Gear hardness if different from
-                the pinion (enables the ZW factor).
+                the pinion (enables the ZW factor). Defaults to the gear
+                material's ``hardness_HB`` when it is a
+                :class:`~mecapy.gears.GearMaterial`.
             St (float): Explicit allowable bending stress number in MPa.
             Sc (float): Explicit allowable contact stress number in MPa.
             YJ_pinion (float): Override for the pinion bending geometry
@@ -409,6 +416,10 @@ class AGMARating:
             raise ValueError(
                 "Give exactly one of 'power_kw' or 'tangential_force'"
             )
+        # Fall back to a GearMaterial on the pinion for the hardness data.
+        if hardness_HB is None and isinstance(pinion.material, GearMaterial):
+            hardness_HB = pinion.material.hardness_HB
+            grade = pinion.material.grade
         if hardness_HB is None and (St is None or Sc is None):
             raise ValueError(
                 "Give 'hardness_HB' (through-hardened steel fits) or "
@@ -480,6 +491,10 @@ class AGMARating:
         self.YN = bending_life_factor(life_cycles)
         self.ZN = contact_life_factor(life_cycles)
         self.YZ = agma_data.reliability_factor(reliability)
+        # Fall back to a GearMaterial on the gear for its hardness (ZW).
+        if (gear_hardness_HB is None and not is_rack
+                and isinstance(gear.material, GearMaterial)):
+            gear_hardness_HB = gear.material.hardness_HB
         if gear_hardness_HB is not None and hardness_HB is not None:
             self.ZW = hardness_ratio_factor(hardness_HB, gear_hardness_HB,
                                             self.gear_ratio)

@@ -10,6 +10,8 @@ Gear types, transmissions and AGMA fatigue rating:
 - :class:`Worm`, :class:`WormWheel` — worm drives.
 - :class:`PlanetaryGearSet` — epicyclic sets (Willis kinematics).
 - :class:`Transmission` — multi-stage trains with compatibility checks.
+- :class:`GearMaterial` — a material carrying Brinell hardness and AGMA
+  grade, read automatically by :class:`~mecapy.gears.agma.AGMARating`.
 - :mod:`mecapy.gears.agma` — AGMA bending/pitting rating
   (:class:`~mecapy.gears.agma.AGMARating`).
 """
@@ -21,6 +23,7 @@ from .cylindrical import (
     HelicalGear,
     HerringboneGear,
 )
+from .material import GearMaterial
 from .rack import Rack
 from .bevel import BevelGear
 from .worm import Worm, WormWheel
@@ -41,6 +44,7 @@ __all__ = [
     "WormWheel",
     "PlanetaryGearSet",
     "Transmission",
+    "GearMaterial",
     "AGMARating",
     "involute",
     "inverse_involute",
