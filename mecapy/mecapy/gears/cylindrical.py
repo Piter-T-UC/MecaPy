@@ -39,7 +39,7 @@ class CylindricalGear(Gear):
     def __init__(self, teeth, module=None, pressure_angle=20.0,
                  helix_angle=0.0, hand=None, face_width=None,
                  profile_shift=0.0, material="steel", name=None,
-                 diametral_pitch=None):
+                 diametral_pitch=None, power_kw=None, speed_rpm=None):
         """
         Initialize a cylindrical gear.
 
@@ -72,7 +72,8 @@ class CylindricalGear(Gear):
         """
         super().__init__(teeth, module=module, pressure_angle=pressure_angle,
                          material=material, name=name,
-                         diametral_pitch=diametral_pitch)
+                         diametral_pitch=diametral_pitch,
+                         power_kw=power_kw, speed_rpm=speed_rpm)
         if not 0 <= helix_angle <= 45:
             raise ValueError("Helix angle must be between 0 and 45 degrees")
         if hand is not None and hand not in ("right", "left"):
@@ -454,7 +455,8 @@ class SpurGear(CylindricalGear):
 
     def __init__(self, teeth, module=None, pressure_angle=20.0,
                  face_width=None, profile_shift=0.0, material="steel",
-                 name=None, diametral_pitch=None):
+                 name=None, diametral_pitch=None, power_kw=None,
+                 speed_rpm=None):
         """
         Initialize a spur gear.
 
@@ -472,7 +474,8 @@ class SpurGear(CylindricalGear):
         super().__init__(teeth, module=module, pressure_angle=pressure_angle,
                          helix_angle=0.0, hand=None, face_width=face_width,
                          profile_shift=profile_shift, material=material,
-                         name=name, diametral_pitch=diametral_pitch)
+                         name=name, diametral_pitch=diametral_pitch,
+                         power_kw=power_kw, speed_rpm=speed_rpm)
 
 
 class HelicalGear(CylindricalGear):
@@ -487,7 +490,7 @@ class HelicalGear(CylindricalGear):
     def __init__(self, teeth, module=None, pressure_angle=20.0,
                  helix_angle=None, hand=None, face_width=None,
                  profile_shift=0.0, material="steel", name=None,
-                 diametral_pitch=None):
+                 diametral_pitch=None, power_kw=None, speed_rpm=None):
         """
         Initialize a helical gear.
 
@@ -519,7 +522,8 @@ class HelicalGear(CylindricalGear):
                          helix_angle=helix_angle, hand=hand,
                          face_width=face_width, profile_shift=profile_shift,
                          material=material, name=name,
-                         diametral_pitch=diametral_pitch)
+                         diametral_pitch=diametral_pitch,
+                         power_kw=power_kw, speed_rpm=speed_rpm)
 
 
 class HerringboneGear(HelicalGear):
@@ -534,7 +538,8 @@ class HerringboneGear(HelicalGear):
 
     def __init__(self, teeth, module=None, pressure_angle=20.0,
                  helix_angle=None, face_width=None, profile_shift=0.0,
-                 material="steel", name=None, diametral_pitch=None):
+                 material="steel", name=None, diametral_pitch=None,
+                 power_kw=None, speed_rpm=None):
         """
         Initialize a herringbone gear.
 
@@ -555,7 +560,8 @@ class HerringboneGear(HelicalGear):
                          helix_angle=helix_angle, hand="right",
                          face_width=face_width, profile_shift=profile_shift,
                          material=material, name=name,
-                         diametral_pitch=diametral_pitch)
+                         diametral_pitch=diametral_pitch,
+                         power_kw=power_kw, speed_rpm=speed_rpm)
         # The opposed halves have no net hand.
         self.hand = None
 

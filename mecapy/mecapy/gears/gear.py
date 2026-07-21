@@ -81,7 +81,8 @@ class Gear(MechaElement):
     _min_teeth = 1
 
     def __init__(self, teeth, module=None, pressure_angle=20.0,
-                 material="steel", name=None, diametral_pitch=None):
+                 material="steel", name=None, diametral_pitch=None,
+                 power_kw=None, speed_rpm=None):
         """
         Initialize a Gear object.
 
@@ -96,11 +97,18 @@ class Gear(MechaElement):
             diametral_pitch (float): US-customary alternative to
                 ``module``, in teeth per inch. Stored internally as
                 ``module = 25.4 / diametral_pitch``.
+            power_kw (float): Optional transmitted power in kW. When set,
+                the force methods use it as the default (no need to pass
+                it at call time). A :class:`Transmission` fills this in
+                for every downstream gear from the first gear.
+            speed_rpm (float): Optional rotational speed in rpm, used the
+                same way as ``power_kw``.
 
         Raises:
             ValueError: If teeth/module/pressure angle are non-physical,
-                or if both (or neither) of ``module`` and
-                ``diametral_pitch`` are given.
+                if both (or neither) of ``module`` and ``diametral_pitch``
+                are given, or if ``power_kw``/``speed_rpm`` are given but
+                not strictly positive.
         """
         super().__init__(name=name, material=material)
         if teeth != int(teeth) or teeth < self._min_teeth:
@@ -123,6 +131,30 @@ class Gear(MechaElement):
         self.module = module
         self.pressure_angle = pressure_angle
         self.profile_shift = 0.0
+        self.power_kw = power_kw
+        self.speed_rpm = speed_rpm
+
+    @property
+    def power_kw(self):
+        """float or None: Transmitted power in kW (None if unset)."""
+        return self._power_kw
+
+    @power_kw.setter
+    def power_kw(self, value):
+        if value is not None and value <= 0:
+            raise ValueError("Power must be strictly positive")
+        self._power_kw = value
+
+    @property
+    def speed_rpm(self):
+        """float or None: Rotational speed in rpm (None if unset)."""
+        return self._speed_rpm
+
+    @speed_rpm.setter
+    def speed_rpm(self, value):
+        if value is not None and value <= 0:
+            raise ValueError("Speed (rpm) must be strictly positive")
+        self._speed_rpm = value
 
     def change_teeth(self, teeth):
         """
@@ -254,32 +286,62 @@ class Gear(MechaElement):
     # Forces and moments
     # ------------------------------------------------------------------
 
-    def pitch_line_velocity(self, speed_rpm):
+    def _resolve_speed(self, speed_rpm):
+        """Fall back to the stored ``speed_rpm`` when none is passed."""
+        speed_rpm = self.speed_rpm if speed_rpm is None else speed_rpm
+        if speed_rpm is None:
+            raise ValueError(
+                "No speed_rpm set on this gear; pass it, set gear.speed_rpm, "
+                "or add the gear to a Transmission"
+            )
+        return speed_rpm
+
+    def _resolve_power(self, power_kw):
+        """Fall back to the stored ``power_kw`` when none is passed."""
+        power_kw = self.power_kw if power_kw is None else power_kw
+        if power_kw is None:
+            raise ValueError(
+                "No power_kw set on this gear; pass it, set gear.power_kw, "
+                "or add the gear to a Transmission"
+            )
+        return power_kw
+
+    def pitch_line_velocity(self, speed_rpm=None):
         """
         Pitch-line velocity at a given rotational speed.
 
         Args:
-            speed_rpm (float): Rotational speed in rpm.
+            speed_rpm (float): Rotational speed in rpm. Defaults to the
+                gear's stored ``speed_rpm`` when omitted.
 
         Returns:
             float: Pitch-line velocity in m/s.
+
+        Raises:
+            ValueError: If no speed is passed and none is stored.
         """
+        speed_rpm = self._resolve_speed(speed_rpm)
         return math.pi * self.pitch_diameter * speed_rpm / 60000.0
 
-    def tangential_force(self, power_kw, speed_rpm):
+    def tangential_force(self, power_kw=None, speed_rpm=None):
         """
         Tangential force at the pitch circle for a transmitted power.
 
         Args:
-            power_kw (float): Transmitted power in kW.
+            power_kw (float): Transmitted power in kW. Defaults to the
+                gear's stored ``power_kw`` when omitted.
             speed_rpm (float): Rotational speed of this gear in rpm.
+                Defaults to the gear's stored ``speed_rpm`` when omitted.
 
         Returns:
             float: Tangential force Ft in N.
 
         Raises:
-            ValueError: If power or speed is not strictly positive.
+            ValueError: If power or speed is not strictly positive, or
+                is neither passed nor stored on the gear.
         """
+        power_kw = self._resolve_power(power_kw)
+        speed_rpm = self._resolve_speed(speed_rpm)
         if power_kw <= 0:
             raise ValueError("Power must be strictly positive")
         if speed_rpm <= 0:
@@ -296,7 +358,7 @@ class Gear(MechaElement):
         helix)."""
         return 0.0
 
-    def force_report(self, power_kw, speed_rpm):
+    def force_report(self, power_kw=None, speed_rpm=None):
         """
         Forces and moments this gear generates at a working point.
 
@@ -309,8 +371,10 @@ class Gear(MechaElement):
         automatically.
 
         Args:
-            power_kw (float): Transmitted power in kW.
+            power_kw (float): Transmitted power in kW. Defaults to the
+                gear's stored ``power_kw`` when omitted.
             speed_rpm (float): Rotational speed of this gear in rpm.
+                Defaults to the gear's stored ``speed_rpm`` when omitted.
 
         Returns:
             dict: With keys ``Ft``, ``Fr``, ``Fa`` (forces in N),
@@ -335,7 +399,7 @@ class Gear(MechaElement):
             "pitch_line_velocity": self.pitch_line_velocity(speed_rpm),
         }
 
-    def describe_forces(self, power_kw, speed_rpm):
+    def describe_forces(self, power_kw=None, speed_rpm=None):
         """
         Multi-line report of the forces and moments this gear generates.
 
@@ -344,8 +408,10 @@ class Gear(MechaElement):
         printed.
 
         Args:
-            power_kw (float): Transmitted power in kW.
+            power_kw (float): Transmitted power in kW. Defaults to the
+                gear's stored ``power_kw`` when omitted.
             speed_rpm (float): Rotational speed of this gear in rpm.
+                Defaults to the gear's stored ``speed_rpm`` when omitted.
 
         Returns:
             str: Formatted force/moment report.

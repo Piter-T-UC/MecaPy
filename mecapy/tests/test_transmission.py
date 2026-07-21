@@ -158,3 +158,75 @@ class TestMeshCompatibility:
         with pytest.raises(ValueError):
             Transmission().add_stage(SpurGear(20, module=4.0),
                                      WormWheel(40, module=4.0))
+
+
+class TestOperatingPointPropagation:
+    """The first gear's power/speed flows onto every downstream gear."""
+
+    def test_auto_propagation_on_add_stage(self):
+        """add_stage assigns speed and power to the driven gear."""
+        p = SpurGear(20, module=2.0, power_kw=10.0, speed_rpm=1500.0)
+        g = SpurGear(60, module=2.0)
+        Transmission().add_stage(p, g)
+        assert g.speed_rpm == pytest.approx(500.0)   # 1500 / (60/20)
+        assert g.power_kw == pytest.approx(10.0)      # lossless
+
+    def test_efficiency_reduces_downstream_power(self):
+        """A per-stage efficiency below 1 lowers the driven power."""
+        p = SpurGear(20, module=2.0, power_kw=10.0, speed_rpm=1500.0)
+        g = SpurGear(60, module=2.0)
+        Transmission().add_stage(p, g, efficiency=0.98)
+        assert g.power_kw == pytest.approx(9.8)
+        assert g.speed_rpm == pytest.approx(500.0)
+
+    def test_efficiency_out_of_range_raises(self):
+        p = SpurGear(20, module=2.0, power_kw=10.0, speed_rpm=1500.0)
+        with pytest.raises(ValueError):
+            Transmission().add_stage(p, SpurGear(60, module=2.0),
+                                     efficiency=1.5)
+
+    def test_two_stage_train(self):
+        """Power and speed propagate across a compound train.
+
+        The stage-1 driven gear (68 t) and the stage-2 driver (18 t) sit
+        on the same shaft, so they share a speed.
+        """
+        p = SpurGear(17, module=2.0, power_kw=10.0, speed_rpm=1200.0)
+        mid_in = SpurGear(68, module=2.0)
+        mid_out = SpurGear(18, module=2.0)
+        out = SpurGear(54, module=2.0)
+        t = (Transmission()
+             .add_stage(p, mid_in, efficiency=0.98)
+             .add_stage(mid_out, out, efficiency=0.97))
+        assert mid_in.speed_rpm == pytest.approx(300.0)   # 1200 / 4
+        assert out.speed_rpm == pytest.approx(100.0)      # 300 / 3
+        assert out.power_kw == pytest.approx(10.0 * 0.98 * 0.97)
+        assert t.output_power == pytest.approx(10.0 * 0.98 * 0.97)
+
+    def test_propagate_requires_first_operating_point(self):
+        """propagate() raises when the first gear has no power/speed."""
+        p = SpurGear(20, module=2.0)
+        t = Transmission().add_stage(p, SpurGear(60, module=2.0))
+        with pytest.raises(ValueError):
+            t.propagate()
+
+    def test_partial_build_does_not_raise(self):
+        """A gear with no operating point builds without auto-propagating."""
+        p = SpurGear(20, module=2.0)
+        g = SpurGear(60, module=2.0)
+        Transmission().add_stage(p, g)   # no raise
+        assert g.speed_rpm is None
+
+    def test_repropagate_after_change_teeth(self):
+        """Re-running propagate() after editing a gear recomputes speeds."""
+        p = SpurGear(20, module=2.0, power_kw=10.0, speed_rpm=1500.0)
+        g = SpurGear(60, module=2.0)
+        t = Transmission().add_stage(p, g)
+        assert g.speed_rpm == pytest.approx(500.0)
+        p.change_teeth(24)
+        t.propagate()
+        assert g.speed_rpm == pytest.approx(600.0)   # 1500 / (60/24)
+
+    def test_output_power_needs_stages(self):
+        with pytest.raises(ValueError):
+            _ = Transmission().output_power

@@ -15,6 +15,7 @@ import math
 
 from .bevel import BevelGear
 from .cylindrical import CylindricalGear, HerringboneGear
+from .gear import Gear
 from .rack import Rack
 from .worm import Worm, WormWheel
 
@@ -134,8 +135,9 @@ class Transmission:
         """
         self.name = name
         self.stages = []
+        self._stage_efficiencies = []
 
-    def add_stage(self, driver, driven):
+    def add_stage(self, driver, driven, efficiency=1.0):
         """
         Append a mesh stage to the train.
 
@@ -144,19 +146,96 @@ class Transmission:
                 rack stage.
             driven: Driven element (gear, worm wheel or rack). A rack
                 ends the train.
+            efficiency (float): Mechanical efficiency of this stage,
+                0 < eta <= 1 (default 1.0 = lossless). Power passed to
+                the next shaft is multiplied by this factor.
 
         Returns:
             Transmission: self, for chaining.
 
         Raises:
-            ValueError: If the pair is incompatible or a rack is not
-                the final element.
+            ValueError: If the pair is incompatible, a rack is not the
+                final element, or the efficiency is out of range.
         """
         if self.stages and isinstance(self.stages[-1][1], Rack):
             raise ValueError("A rack must be the final element of the train")
+        if not 0 < efficiency <= 1:
+            raise ValueError("Efficiency must be in (0, 1]")
         _check_mesh(driver, driven)
         self.stages.append((driver, driven))
+        self._stage_efficiencies.append(efficiency)
+        self._try_propagate()
         return self
+
+    def propagate(self):
+        """
+        Push the first gear's operating point through the whole train.
+
+        Starting from the first driver's ``power_kw`` and ``speed_rpm``,
+        assign each downstream element its rotational speed (input speed
+        divided by the cumulative stage ratio) and its transmitted power
+        (multiplied by each stage efficiency). Elements sharing a shaft
+        take the same speed and power. Non-gear elements (a rack or a
+        worm) are skipped — they carry no rotational operating point.
+
+        Call this again after editing a gear in place (e.g.
+        :meth:`Gear.change_teeth`) to recompute the train — the values
+        are stored on the gears, so they do not update on their own.
+
+        Returns:
+            Transmission: self, for chaining.
+
+        Raises:
+            ValueError: If there are no stages, or the first driver has
+                no ``power_kw``/``speed_rpm`` set.
+        """
+        self._require_stages()
+        first = self.stages[0][0]
+        if getattr(first, "power_kw", None) is None or \
+                getattr(first, "speed_rpm", None) is None:
+            raise ValueError(
+                "The first driver must have power_kw and speed_rpm set "
+                "before the transmission can propagate them"
+            )
+        speed, power = first.speed_rpm, first.power_kw
+        for (driver, driven), eff in zip(self.stages,
+                                         self._stage_efficiencies):
+            if isinstance(driver, Gear):
+                driver.speed_rpm = speed
+                driver.power_kw = power
+            r = _stage_ratio(driver, driven)
+            if r is not None:
+                speed = speed / r
+            power = power * eff
+            if isinstance(driven, Gear):
+                driven.speed_rpm = speed
+                driven.power_kw = power
+        return self
+
+    def _try_propagate(self):
+        """Propagate only if the first driver already has power and speed."""
+        first = self.stages[0][0]
+        if getattr(first, "power_kw", None) is not None and \
+                getattr(first, "speed_rpm", None) is not None:
+            self.propagate()
+
+    @property
+    def output_power(self):
+        """float: Power at the output shaft in kW (first gear's power
+        times every stage efficiency).
+
+        Raises:
+            ValueError: If there are no stages or the first driver has
+                no ``power_kw`` set.
+        """
+        self._require_stages()
+        first = self.stages[0][0]
+        if getattr(first, "power_kw", None) is None:
+            raise ValueError("The first driver has no power_kw set")
+        power = first.power_kw
+        for eff in self._stage_efficiencies:
+            power *= eff
+        return power
 
     # ------------------------------------------------------------------
     # Ratios and kinematics

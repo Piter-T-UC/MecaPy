@@ -599,3 +599,67 @@ class TestForces:
         assert f["Ft"] == pytest.approx(
             pinion.tangential_force(1.0, 600.0))
         assert f["Fr"] == pytest.approx(f["Ft"] * math.tan(math.radians(20)))
+
+
+class TestOperatingPoint:
+    """Gears that carry a stored power_kw / speed_rpm operating point."""
+
+    def test_constructor_stores_operating_point(self):
+        """power_kw and speed_rpm passed to the constructor are stored."""
+        g = SpurGear(teeth=20, module=2.0, power_kw=10.0, speed_rpm=1500.0)
+        assert g.power_kw == 10.0
+        assert g.speed_rpm == 1500.0
+
+    def test_defaults_are_none(self):
+        """Without an operating point the attributes are None."""
+        g = SpurGear(teeth=20, module=2.0)
+        assert g.power_kw is None
+        assert g.speed_rpm is None
+
+    def test_setter_rejects_non_positive(self):
+        """Zero or negative power/speed is rejected by the setter."""
+        g = SpurGear(teeth=20, module=2.0)
+        with pytest.raises(ValueError):
+            g.power_kw = 0
+        with pytest.raises(ValueError):
+            g.speed_rpm = -5
+
+    def test_constructor_rejects_non_positive(self):
+        """Non-physical operating point is rejected at construction."""
+        with pytest.raises(ValueError):
+            SpurGear(teeth=20, module=2.0, power_kw=-1.0)
+        with pytest.raises(ValueError):
+            SpurGear(teeth=20, module=2.0, speed_rpm=0)
+
+    def test_setter_accepts_none(self):
+        """Clearing the operating point back to None is allowed."""
+        g = SpurGear(teeth=20, module=2.0, power_kw=10.0, speed_rpm=1500.0)
+        g.power_kw = None
+        assert g.power_kw is None
+
+    def test_force_uses_stored_values(self):
+        """Force methods fall back to the stored operating point."""
+        g = SpurGear(teeth=20, module=2.0, power_kw=10.0, speed_rpm=1500.0)
+        assert g.tangential_force() == pytest.approx(
+            g.tangential_force(10.0, 1500.0))
+        assert g.force_report()["Ft"] == pytest.approx(
+            g.tangential_force(10.0, 1500.0))
+
+    def test_explicit_args_override_stored(self):
+        """Explicit call arguments still win over stored values."""
+        g = SpurGear(teeth=20, module=2.0, power_kw=10.0, speed_rpm=1500.0)
+        explicit = g.tangential_force(20.0, 1500.0)
+        assert explicit == pytest.approx(2 * g.tangential_force())
+
+    def test_missing_operating_point_raises(self):
+        """A force method with nothing to fall back on raises."""
+        g = SpurGear(teeth=20, module=2.0)
+        with pytest.raises(ValueError):
+            g.tangential_force()
+
+    def test_recompute_after_speed_change(self):
+        """Changing speed_rpm updates the derived tangential force."""
+        g = SpurGear(teeth=20, module=2.0, power_kw=10.0, speed_rpm=1500.0)
+        before = g.tangential_force()
+        g.speed_rpm = 3000.0
+        assert g.tangential_force() == pytest.approx(before / 2)
