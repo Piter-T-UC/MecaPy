@@ -120,6 +120,12 @@ class Beam(MechaElement):
         Segment positions are exact ``sympy.Rational`` values, since
         sympy's reaction solver breaks on plain-float positions.
 
+        Note: with a symbolic ``E`` or ``I``, :meth:`max_bending_moment`
+        / :meth:`max_deflection` fall back to sympy's symbolic extremum
+        search, which is intractably slow with the many singularity
+        terms this method adds — give the beam numeric ``E`` and ``I``
+        so the fast sampled path applies.
+
         Args:
             func (callable): Load intensity ``f(x)`` — takes a position
                 (float) and returns force per unit length (negative acts
@@ -202,15 +208,42 @@ class Beam(MechaElement):
         self._ensure_solved()
         return self._beam.deflection()
 
+    def _numeric_max(self, expr, n=201):
+        """(location, magnitude) of the largest-magnitude sample of a
+        fully numeric expression, or None if it has symbols besides x."""
+        x = self._beam.variable
+        if expr.free_symbols - {x}:
+            return None
+        xs = [self.length * i / (n - 1) for i in range(n)]
+        return max(
+            ((xi, abs(float(expr.subs(x, xi)))) for xi in xs),
+            key=lambda point: point[1],
+        )
+
     def max_bending_moment(self):
-        """Return ``(location, value)`` of the maximum bending moment."""
+        """
+        Return ``(location, value)`` of the maximum bending moment.
+
+        When the moment expression is fully numeric the extremum is
+        found by sampling 201 points and ``value`` is the magnitude —
+        sympy's symbolic search takes minutes with more than a couple of
+        loads. With symbolic inputs (e.g. symbolic E or I) sympy's exact
+        ``max_bmoment`` is used instead.
+        """
         self._ensure_solved()
-        return self._beam.max_bmoment()
+        numeric = self._numeric_max(self._beam.bending_moment())
+        return numeric if numeric is not None else self._beam.max_bmoment()
 
     def max_deflection(self):
-        """Return ``(location, value)`` of the maximum deflection."""
+        """
+        Return ``(location, value)`` of the maximum deflection.
+
+        Numeric-vs-symbolic behaviour matches
+        :meth:`max_bending_moment`.
+        """
         self._ensure_solved()
-        return self._beam.max_deflection()
+        numeric = self._numeric_max(self._beam.deflection())
+        return numeric if numeric is not None else self._beam.max_deflection()
 
     def bending_stress(self, distance_to_fiber, second_moment=None):
         """

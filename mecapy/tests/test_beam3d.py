@@ -224,7 +224,7 @@ class TestBeam3DResults:
         beam.add_support(0, "pin").add_support(2.0, "roller").add_point_load(-1000, 1.0)
         location, moment = beam.max_bending_moment()["y"]
         assert float(location) == pytest.approx(1.0)
-        assert float(moment) == pytest.approx(500)  # 1000 * 2 / 4
+        assert abs(float(moment)) == pytest.approx(500)  # 1000 * 2 / 4
 
     def test_simply_supported_deflection(self):
         """Central-load midspan deflection integrates to P*L^3/(48*E*I)."""

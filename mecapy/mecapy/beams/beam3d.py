@@ -478,39 +478,50 @@ class Beam3D(MechaElement):
         """
         return {plane: self._build_beam(plane).deflection() for plane in _PLANES}
 
-    def max_bending_moment(self):
+    def _sampled_max(self, results, n):
+        """(location, signed value) of the largest-magnitude sample per
+        plane; (0.0, 0.0) for an unloaded plane."""
+        out = {}
+        for plane in _PLANES:
+            if self._has_plane_loads(plane):
+                xs, ys = self._sample(results[plane], n)
+                out[plane] = max(zip(xs, ys), key=lambda point: abs(point[1]))
+            else:
+                out[plane] = (0.0, 0.0)
+        return out
+
+    def max_bending_moment(self, n=201):
         """
-        Maximum bending moment in each plane.
+        Maximum-magnitude bending moment in each plane, found by
+        sampling ``n`` points (sympy's symbolic extremum search becomes
+        intractably slow with many singularity terms, e.g. from
+        :meth:`add_function_load`). The location is resolved to within
+        ``length / (n - 1)``.
+
+        Args:
+            n (int): Number of sample points (>= 2, default: 201).
 
         Returns:
             dict: ``{"y": (location, value), "z": (location, value)}`` in
-            (m, N*m); ``(0.0, 0.0)`` for a plane with no loads.
+            (m, N*m), value signed; ``(0.0, 0.0)`` for a plane with no
+            loads.
         """
-        return {
-            plane: (
-                self._build_beam(plane).max_bending_moment()
-                if self._has_plane_loads(plane)
-                else (0.0, 0.0)
-            )
-            for plane in _PLANES
-        }
+        return self._sampled_max(self.bending_moment(), n)
 
-    def max_deflection(self):
+    def max_deflection(self, n=201):
         """
-        Maximum deflection in each plane.
+        Maximum-magnitude deflection in each plane, found by sampling
+        ``n`` points (see :meth:`max_bending_moment` for why).
+
+        Args:
+            n (int): Number of sample points (>= 2, default: 201).
 
         Returns:
             dict: ``{"y": (location, value), "z": (location, value)}`` in
-            (m, m); ``(0.0, 0.0)`` for a plane with no loads.
+            (m, m), value signed; ``(0.0, 0.0)`` for a plane with no
+            loads.
         """
-        return {
-            plane: (
-                self._build_beam(plane).max_deflection()
-                if self._has_plane_loads(plane)
-                else (0.0, 0.0)
-            )
-            for plane in _PLANES
-        }
+        return self._sampled_max(self.deflection(), n)
 
     def axial_force(self):
         """
@@ -838,24 +849,66 @@ class Beam3D(MechaElement):
                 style = "-" if dir_ == "y" else "--"
                 suffix = "" if dir_ == "y" else " (z)"
                 _force_arrow(start, value, color, style, f"{value:g} N{suffix}")
-            else:  # distributed: arrow row with a connecting tail line
+            # transverse distributed loads are rendered below as one
+            # summed-intensity envelope per direction
+
+        # Distributed loads: draw the summed intensity q(x) per direction
+        # as one height-scaled envelope with a few arrows, so overlapping
+        # segments (e.g. the slices add_function_load creates) read as a
+        # single load shape instead of a wall of arrow rows.
+        distributed = [row for row in self._loads if row[2] >= 0 and row[3] != "x"]
+
+        def intensity(direction, x_pos):
+            q = 0.0
+            for value, start, order, dir_, end in distributed:
                 stop = length if end is None else end
-                color = _COLOR_Y if dir_ == "y" else _COLOR_GREY
-                style = "-" if dir_ == "y" else "--"
-                suffix = "" if dir_ == "y" else " (z)"
-                top = h / 2 + 1.2 * h if value <= 0 else -h / 2 - 1.2 * h
-                face = h / 2 if value <= 0 else -h / 2
-                arrow_n = 7
-                for i in range(arrow_n):
-                    x_pos = start + (stop - start) * i / (arrow_n - 1)
-                    ax.annotate(
-                        "", xy=(x_pos, face), xytext=(x_pos, top),
-                        arrowprops={"arrowstyle": "-|>", "color": color,
-                                    "linestyle": style, "linewidth": 1},
-                    )
-                ax.plot([start, stop], [top, top], color=color, linestyle=style, linewidth=1)
-                ax.text((start + stop) / 2, top + (0.15 * h if value <= 0 else -0.45 * h),
-                        f"{value:g} N/m{suffix}", fontsize=8, color=color, ha="center")
+                # half-open span so adjacent segments (e.g. from
+                # add_function_load) don't double-count at their shared
+                # boundary; the beam's far end stays inclusive
+                inside = start <= x_pos < stop or x_pos == stop == length
+                if dir_ == direction and inside:
+                    q += value * (x_pos - start) ** order
+            return q
+
+        n_env = 101
+        xs_env = [length * i / (n_env - 1) for i in range(n_env)]
+        directions = sorted({row[3] for row in distributed})
+        peaks = {
+            direction: max(abs(intensity(direction, xi)) for xi in xs_env)
+            for direction in directions
+        }
+        scale_peak = max(peaks.values(), default=0.0)
+        for direction in directions:
+            if not peaks[direction]:
+                continue
+            scale = 1.5 * h / scale_peak
+            color = _COLOR_Y if direction == "y" else _COLOR_GREY
+            style = "-" if direction == "y" else "--"
+            suffix = "" if direction == "y" else " (z)"
+            qs = [intensity(direction, xi) for xi in xs_env]
+            # envelope above the beam for downward (negative) load,
+            # below for upward — nan breaks the line where q = 0
+            ys = [
+                (h / 2 + abs(q) * scale) if q < 0
+                else (-h / 2 - q * scale) if q > 0
+                else float("nan")
+                for q in qs
+            ]
+            ax.plot(xs_env, ys, color=color, linestyle=style, linewidth=1.2)
+            for xi, q, y_env in list(zip(xs_env, qs, ys))[::8]:
+                if abs(q) < 0.05 * peaks[direction]:
+                    continue
+                face = h / 2 if q < 0 else -h / 2
+                ax.annotate(
+                    "", xy=(xi, face), xytext=(xi, y_env),
+                    arrowprops={"arrowstyle": "-|>", "color": color,
+                                "linestyle": style, "linewidth": 1},
+                )
+            peak_index = max(range(n_env), key=lambda i: abs(qs[i]))
+            label_y = ys[peak_index] + (0.2 * h if qs[peak_index] < 0 else -0.5 * h)
+            ax.text(xs_env[peak_index], label_y,
+                    f"q max = {abs(qs[peak_index]):.4g} N/m{suffix}",
+                    fontsize=8, color=color, ha="center")
 
         for value, location, dir_ in self._moments:
             ax.add_patch(FancyArrowPatch(

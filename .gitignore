@@ -134,3 +134,6 @@ graphify-out/
 
 # Claude Code local settings
 **/.claude/settings.local.json
+
+# Personal scratch scripts (not for the repo)
+sandbox/

@@ -60,10 +60,18 @@ class TestMaterialConstruction:
         with pytest.raises(ValueError):
             Material("steel", loading="shear")
 
-    def test_unknown_reliability_raises(self):
-        """A reliability not in Table 6-5 raises ValueError."""
+    def test_reliability_out_of_range_raises(self):
+        """A reliability outside [0.5, 1) raises ValueError."""
         with pytest.raises(ValueError):
-            Material("steel", reliability=0.98)
+            Material("steel", reliability=1.0)
+        with pytest.raises(ValueError):
+            Material("steel", reliability=0.4)
+
+    def test_reliability_off_table_is_computed(self):
+        """A reliability not in Table 6-5 gets ke from Shigley Eq. 6-30."""
+        # R=0.98 sits between the 0.95 (0.868) and 0.99 (0.814) table rows.
+        ke = Material("steel", reliability=0.98).ke
+        assert 0.814 < ke < 0.868
 
     def test_temperature_out_of_range_raises(self):
         """A temperature outside the Table 6-4 range raises ValueError."""
@@ -82,6 +90,7 @@ class TestMaterialConstruction:
         m = Material("steel")
         assert "steel" in repr(m)
         assert "400" in repr(m)
+        assert "Alloy A" in repr(Material("steel", name="Alloy A"))
 
 
 class TestMarinFactors:
@@ -115,6 +124,24 @@ class TestMarinFactors:
     def test_kb_no_diameter_is_one(self):
         """Without a diameter, kb defaults to 1."""
         assert Material("steel").kb == 1.0
+
+    def test_eq_diameter_round_trip(self):
+        """eq_diameter recovers d from a round section's 95% area."""
+        m = Material("steel")
+        d_e = m.eq_diameter(0.0766 * 50 ** 2)  # A_0.95sigma for d = 50 mm
+        assert d_e == pytest.approx(50.0)
+        assert m.diameter == pytest.approx(50.0)  # it also set the diameter
+        assert m.kb == pytest.approx((50 / 7.62) ** -0.107)
+
+    def test_eq_diameter_invalid_area(self):
+        """A non-positive 95% area raises ValueError."""
+        with pytest.raises(ValueError):
+            Material("steel").eq_diameter(0)
+
+    def test_eq_diameter_out_of_kb_range(self):
+        """A d_e outside the kb validity range raises ValueError."""
+        with pytest.raises(ValueError):
+            Material("steel").eq_diameter(5000)  # d_e ~ 255 mm > 254
 
     @pytest.mark.parametrize("loading,expected",
                              [("bending", 1.0), ("axial", 0.85),
@@ -306,6 +333,93 @@ class TestLoadCases:
         damage_machined = m.miner_damage()
         m.surface_finish = "as_forged"
         assert m.miner_damage() != pytest.approx(damage_machined)
+
+
+class TestMeanStressCriteria:
+    """Test cases for the Soderberg/Gerber/ASME/Langer criteria."""
+
+    def test_each_criterion_positive(self):
+        """Every fatigue criterion returns a finite positive nf."""
+        m = Material("steel")  # Sut=400, Sy=250 MPa
+        for c in ("goodman", "soderberg", "gerber", "asme_elliptic"):
+            nf = m.fatigue_safety_factor(100, 80, criterion=c)
+            assert math.isfinite(nf) and nf > 0
+
+    def test_conservatism_ordering(self):
+        """Soderberg <= Goodman <= Gerber for tensile mean stress."""
+        m = Material("steel")
+        sod = m.fatigue_safety_factor(100, 80, "soderberg")
+        good = m.fatigue_safety_factor(100, 80, "goodman")
+        ger = m.fatigue_safety_factor(100, 80, "gerber")
+        assert sod <= good <= ger
+
+    def test_goodman_alias(self):
+        """goodman_safety_factor equals the goodman fatigue factor."""
+        m = Material("steel")
+        assert (m.goodman_safety_factor(100, 50)
+                == m.fatigue_safety_factor(100, 50, "goodman"))
+
+    def test_soderberg_formula(self):
+        """Soderberg nf follows Eq. 6-45 (uses Sy, not Sut)."""
+        m = Material("steel")
+        nf = m.fatigue_safety_factor(100, 60, "soderberg")
+        expected = 1 / (100 / m.endurance_limit + 60 / m.yield_strength)
+        assert nf == pytest.approx(expected)
+
+    def test_asme_elliptic_formula(self):
+        """ASME-elliptic nf follows Eq. 6-50."""
+        m = Material("steel")
+        nf = m.fatigue_safety_factor(100, 60, "asme_elliptic")
+        expected = 1 / math.sqrt((100 / m.endurance_limit) ** 2
+                                 + (60 / m.yield_strength) ** 2)
+        assert nf == pytest.approx(expected)
+
+    def test_cycles_differ_by_criterion(self):
+        """Each criterion folds mean stress differently -> different N."""
+        m = Material("steel")
+        n_good = m.cycles_to_failure(200, 100, "goodman")
+        n_sod = m.cycles_to_failure(200, 100, "soderberg")
+        assert n_sod < n_good  # Soderberg folds to a higher sigma_ar
+
+    def test_cycles_default_is_goodman(self):
+        """cycles_to_failure defaults to the goodman fold (unchanged)."""
+        m = Material("steel")
+        assert (m.cycles_to_failure(200, 100)
+                == m.cycles_to_failure(200, 100, "goodman"))
+
+    def test_langer_safety_factor(self):
+        """Langer yield factor follows Eq. 6-49, n = Sy/(sa+sm)."""
+        m = Material("steel")
+        assert (m.langer_safety_factor(100, 50)
+                == pytest.approx(m.yield_strength / 150))
+
+    def test_governing_picks_yield(self):
+        """Large mean stress -> Langer yield governs."""
+        m = Material("steel")
+        nf, mode = m.governing_safety_factor(5, 240)
+        assert mode == "yield"
+        assert nf == pytest.approx(m.langer_safety_factor(5, 240))
+
+    def test_governing_picks_fatigue(self):
+        """Large amplitude -> the fatigue criterion governs."""
+        m = Material("steel")
+        nf, mode = m.governing_safety_factor(180, 5)
+        assert mode == "fatigue"
+        assert nf == pytest.approx(m.fatigue_safety_factor(180, 5))
+
+    def test_unknown_criterion_raises(self):
+        """An unknown criterion raises ValueError."""
+        m = Material("steel")
+        with pytest.raises(ValueError):
+            m.fatigue_safety_factor(100, 50, "junk")
+
+    def test_soderberg_mean_above_yield_raises(self):
+        """Soderberg/ASME reject sigma_m >= Sy (out of their range)."""
+        m = Material("steel")  # Sy = 250 MPa
+        with pytest.raises(ValueError):
+            m.fatigue_safety_factor(100, 250, "soderberg")
+        with pytest.raises(ValueError):
+            m.cycles_to_failure(100, 260, "asme_elliptic")
 
 
 class TestMechaElementIntegration:

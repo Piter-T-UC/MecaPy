@@ -8,6 +8,7 @@ Fatigue relations follow Shigley's Mechanical Engineering Design, Ch. 6.
 """
 
 import math
+from statistics import NormalDist
 
 from .utils import constants
 
@@ -73,6 +74,10 @@ RELIABILITY_FACTORS = {
     0.999: 0.753, 0.9999: 0.702, 0.99999: 0.659,
 }
 
+# Mean-stress fatigue criteria (Shigley Ch. 6). Goodman/Gerber use Sut as
+# the mean-axis intercept; Soderberg/ASME-elliptic use Sy.
+_FATIGUE_CRITERIA = ("goodman", "soderberg", "gerber", "asme_elliptic")
+
 # Sut below which the fatigue-strength fraction f is taken as 0.9
 # (70 kpsi, Shigley Fig. 6-18).
 _F_FRACTION_SUT_MIN = 482.6  # MPa
@@ -81,6 +86,10 @@ _MPA_PER_KPSI = constants.PSI_TO_MPA * 1e3
 # Validity range of the rotating-size factor kb (Shigley Eq. 6-20), mm.
 _KB_DIAMETER_MIN = 2.79
 _KB_DIAMETER_MAX = 254.0
+
+# 95%-stress-area coefficient for the equivalent diameter (Shigley Eq. 6-25):
+# a rotating round section has A_0.95sigma = 0.0766 * d^2.
+_A95_COEFF = 0.0766
 
 _LOAD_CASE_KEYS = ("stress_amplitude", "mean_stress", "cycles", "label")
 
@@ -111,8 +120,9 @@ class Material:
         diameter (float or None): Rotating-section diameter in mm for kb
             (None -> kb = 1).
         temperature (float): Operating temperature in deg C for kd.
-        reliability (float): Survival probability for ke (key of
-            ``RELIABILITY_FACTORS``).
+        reliability (float): Survival probability for ke, in [0.5, 1).
+            Tabulated values (``RELIABILITY_FACTORS``) use Table 6-5;
+            any other value is computed from Shigley Eq. 6-30.
         name (str): Optional identifier.
     """
 
@@ -141,7 +151,8 @@ class Material:
             temperature (float): Operating temperature in deg C (default:
                 20). Must be within [20, 600] (Table 6-4 range).
             reliability (float): Survival probability (default: 0.5, i.e.
-                ke = 1). Must be a key of ``RELIABILITY_FACTORS``.
+                ke = 1). Must be in [0.5, 1); tabulated values use Table
+                6-5, any other value is computed from Shigley Eq. 6-30.
             name (str): Optional identifier.
 
         Raises:
@@ -250,6 +261,34 @@ class Material:
             )
         self._diameter = value
 
+    def eq_diameter(self, A95):
+        """
+        Set the size-factor diameter from a 95%-stress area (Eq. 6-25).
+
+        For a non-round or non-rotating section the size factor kb uses an
+        equivalent rotating diameter d_e = sqrt(A_0.95sigma / 0.0766),
+        where A_0.95sigma is the area stressed to at least 95% of the
+        maximum. This sets ``self.diameter`` to d_e (so kb picks it up) and
+        returns d_e.
+
+        Args:
+            A95 (float): 95%-stress area A_0.95sigma in mm^2. Must be
+                strictly positive.
+
+        Returns:
+            float: Equivalent diameter d_e in mm.
+
+        Raises:
+            ValueError: If ``A95`` is not strictly positive, or the
+                resulting d_e falls outside the kb validity range
+                [2.79, 254] mm.
+        """
+        if A95 <= 0:
+            raise ValueError("A95 must be strictly positive")
+        d_e = math.sqrt(A95 / _A95_COEFF)
+        self.diameter = d_e  # revalidates against the kb range
+        return d_e
+
     @property
     def temperature(self):
         """float: Operating temperature in deg C for kd."""
@@ -272,10 +311,9 @@ class Material:
 
     @reliability.setter
     def reliability(self, value):
-        if value not in RELIABILITY_FACTORS:
-            available = ", ".join(str(r) for r in sorted(RELIABILITY_FACTORS))
+        if not 0.5 <= value < 1:
             raise ValueError(
-                f"Unknown reliability {value!r}. Available: {available}"
+                f"Reliability {value!r} must be in [0.5, 1)"
             )
         self._reliability = value
 
@@ -318,8 +356,15 @@ class Material:
 
     @property
     def ke(self):
-        """float: Marin reliability factor (Table 6-5)."""
-        return RELIABILITY_FACTORS[self.reliability]
+        """float: Marin reliability factor (Shigley Table 6-5 / Eq. 6-30).
+
+        Uses the tabulated value for a listed reliability, otherwise
+        computes ke = 1 - 0.08*za with za = Phi^-1(R) (the formula the
+        table is built from).
+        """
+        if self.reliability in RELIABILITY_FACTORS:
+            return RELIABILITY_FACTORS[self.reliability]
+        return 1 - 0.08 * NormalDist().inv_cdf(self.reliability)
 
     @property
     def se_prime(self):
@@ -367,40 +412,110 @@ class Material:
         return -math.log10(self.f * self.ultimate_strength
                            / self.endurance_limit) / 3
 
-    def cycles_to_failure(self, stress_amplitude, mean_stress=0.0):
+    def _equivalent_reversed_stress(self, stress_amplitude, mean_stress,
+                                    criterion):
+        """float: Completely-reversed stress sigma_ar for a criterion, MPa.
+
+        Folds the mean stress into an equivalent fully reversed amplitude
+        (Shigley Table 6-7). Callers must have validated the (sigma_a,
+        sigma_m, criterion) triple first, so the denominators stay positive.
         """
-        Cycles to failure N for a cyclic stress (Goodman + S-N, Eq. 6-16).
+        s = self._mean_strength(criterion)
+        if criterion == "gerber":
+            return stress_amplitude / (1 - (mean_stress / s) ** 2)
+        if criterion == "asme_elliptic":
+            return stress_amplitude / math.sqrt(1 - (mean_stress / s) ** 2)
+        return stress_amplitude / (1 - mean_stress / s)  # goodman, soderberg
+
+    def _fatigue_nf(self, stress_amplitude, mean_stress, criterion):
+        """float: Infinite-life fatigue safety factor for a criterion.
+
+        Closed forms from Shigley Eqs. 6-45..6-50. Callers validate first.
+        """
+        se, sut, sy = (self.endurance_limit, self.ultimate_strength,
+                       self.yield_strength)
+        if criterion == "soderberg":
+            return 1 / (stress_amplitude / se + mean_stress / sy)
+        if criterion == "asme_elliptic":
+            return 1 / math.sqrt((stress_amplitude / se) ** 2
+                                 + (mean_stress / sy) ** 2)
+        if criterion == "gerber":
+            if mean_stress == 0:
+                return se / stress_amplitude
+            return (0.5 * (sut / mean_stress) ** 2 * (stress_amplitude / se)
+                    * (-1 + math.sqrt(1 + (2 * mean_stress * se
+                                           / (sut * stress_amplitude)) ** 2)))
+        return 1 / (stress_amplitude / se + mean_stress / sut)  # goodman
+
+    def cycles_to_failure(self, stress_amplitude, mean_stress=0.0,
+                          criterion="goodman"):
+        """
+        Cycles to failure N for a cyclic stress (mean-stress fold + S-N).
 
         The mean stress is folded into an equivalent fully reversed
-        amplitude with the Goodman line, sigma_ar = sigma_a/(1 - sigma_m/Sut),
-        then N = (sigma_ar/a)^(1/b).
+        amplitude sigma_ar with the chosen criterion (Shigley Table 6-7),
+        then N = (sigma_ar/a)^(1/b) from the S-N curve (Eq. 6-16).
 
         Args:
             stress_amplitude (float): Alternating stress sigma_a in MPa.
                 Must be strictly positive.
             mean_stress (float): Mean stress sigma_m in MPa (default: 0).
-                Must be within [0, Sut) — the Goodman line applies to
-                tensile mean stress.
+                Must be within [0, Sut) for goodman/gerber or [0, Sy) for
+                soderberg/asme_elliptic.
+            criterion (str): Mean-stress criterion (default: "goodman").
+                One of ``_FATIGUE_CRITERIA``.
 
         Returns:
             float: Cycles to failure; ``math.inf`` if the equivalent
             amplitude is at or below the endurance limit.
 
         Raises:
-            ValueError: If ``stress_amplitude`` is not strictly positive or
-                ``mean_stress`` is outside [0, Sut).
+            ValueError: If ``stress_amplitude`` is not strictly positive,
+                ``mean_stress`` is out of range, or ``criterion`` is unknown.
         """
-        self._validate_cycle_stress(stress_amplitude, mean_stress)
-        sigma_ar = stress_amplitude / (1 - mean_stress / self.ultimate_strength)
+        self._validate_cycle_stress(stress_amplitude, mean_stress, criterion)
+        sigma_ar = self._equivalent_reversed_stress(
+            stress_amplitude, mean_stress, criterion)
         if sigma_ar <= self.endurance_limit:
             return math.inf
         return (sigma_ar / self.sn_a) ** (1 / self.sn_b)
+
+    def fatigue_safety_factor(self, stress_amplitude, mean_stress=0.0,
+                              criterion="goodman"):
+        """
+        Infinite-life fatigue safety factor for a mean-stress criterion.
+
+        Closed forms (Shigley Ch. 6):
+        - goodman (6-46): nf = 1/(sigma_a/Se + sigma_m/Sut)
+        - soderberg (6-45): nf = 1/(sigma_a/Se + sigma_m/Sy)
+        - gerber (6-48): parabolic, uses Sut
+        - asme_elliptic (6-50): nf = 1/sqrt((sigma_a/Se)^2 + (sigma_m/Sy)^2)
+
+        Args:
+            stress_amplitude (float): Alternating stress sigma_a in MPa.
+                Must be strictly positive.
+            mean_stress (float): Mean stress sigma_m in MPa (default: 0).
+                Must be within [0, Sut) for goodman/gerber or [0, Sy) for
+                soderberg/asme_elliptic.
+            criterion (str): Mean-stress criterion (default: "goodman").
+                One of ``_FATIGUE_CRITERIA``.
+
+        Returns:
+            float: Safety factor against infinite-life fatigue failure.
+
+        Raises:
+            ValueError: If ``stress_amplitude`` is not strictly positive,
+                ``mean_stress`` is out of range, or ``criterion`` is unknown.
+        """
+        self._validate_cycle_stress(stress_amplitude, mean_stress, criterion)
+        return self._fatigue_nf(stress_amplitude, mean_stress, criterion)
 
     def goodman_safety_factor(self, stress_amplitude, mean_stress=0.0):
         """
         Fatigue safety factor per the modified Goodman criterion (Eq. 6-46).
 
-        nf = 1 / (sigma_a/Se + sigma_m/Sut).
+        Alias for ``fatigue_safety_factor(..., criterion="goodman")``, kept
+        for backward compatibility.
 
         Args:
             stress_amplitude (float): Alternating stress sigma_a in MPa.
@@ -415,20 +530,101 @@ class Material:
             ValueError: If ``stress_amplitude`` is not strictly positive or
                 ``mean_stress`` is outside [0, Sut).
         """
-        self._validate_cycle_stress(stress_amplitude, mean_stress)
-        return 1 / (stress_amplitude / self.endurance_limit
-                    + mean_stress / self.ultimate_strength)
+        return self.fatigue_safety_factor(stress_amplitude, mean_stress,
+                                          "goodman")
+
+    def langer_safety_factor(self, stress_amplitude, mean_stress=0.0):
+        """
+        First-cycle static-yield safety factor (Langer line, Eq. 6-49).
+
+        n = Sy / (sigma_a + sigma_m). This guards against yielding on the
+        first load application, independent of the fatigue criterion.
+
+        Args:
+            stress_amplitude (float): Alternating stress sigma_a in MPa.
+                Must be strictly positive.
+            mean_stress (float): Mean stress sigma_m in MPa (default: 0).
+                Must be non-negative.
+
+        Returns:
+            float: Safety factor against first-cycle yielding.
+
+        Raises:
+            ValueError: If ``stress_amplitude`` is not strictly positive or
+                ``mean_stress`` is negative.
+        """
+        if stress_amplitude <= 0:
+            raise ValueError("Stress amplitude must be strictly positive")
+        if mean_stress < 0:
+            raise ValueError("Mean stress must be non-negative")
+        return self.yield_strength / (stress_amplitude + mean_stress)
+
+    def governing_safety_factor(self, stress_amplitude, mean_stress=0.0,
+                                criterion="goodman"):
+        """
+        Governing safety factor: the smaller of fatigue and Langer yield.
+
+        Design practice caps the fatigue line with the first-cycle Langer
+        yield line, so the governing factor is
+        ``min(fatigue_safety_factor(...), langer_safety_factor(...))``.
+
+        Args:
+            stress_amplitude (float): Alternating stress sigma_a in MPa.
+                Must be strictly positive.
+            mean_stress (float): Mean stress sigma_m in MPa (default: 0).
+            criterion (str): Fatigue criterion (default: "goodman"). One of
+                ``_FATIGUE_CRITERIA``.
+
+        Returns:
+            tuple: ``(nf, mode)`` where ``nf`` is the governing safety
+            factor and ``mode`` is ``"yield"`` if the Langer line governs,
+            else ``"fatigue"``.
+
+        Raises:
+            ValueError: If any input fails validation or ``criterion`` is
+                unknown.
+        """
+        fatigue = self.fatigue_safety_factor(stress_amplitude, mean_stress,
+                                             criterion)
+        yielding = self.langer_safety_factor(stress_amplitude, mean_stress)
+        if yielding < fatigue:
+            return yielding, "yield"
+        return fatigue, "fatigue"
 
     # ---- Cyclic load cases, Miner's rule ----
 
-    def _validate_cycle_stress(self, stress_amplitude, mean_stress):
-        """Validate a (sigma_a, sigma_m) pair, raising ValueError."""
+    def _mean_strength(self, criterion):
+        """float: Mean-axis intercept for a criterion (Sut or Sy), in MPa.
+
+        Goodman and Gerber intercept the mean axis at Sut; Soderberg and
+        ASME-elliptic intercept it at Sy. Raises ValueError on an unknown
+        criterion.
+        """
+        if criterion not in _FATIGUE_CRITERIA:
+            raise ValueError(
+                f"Unknown criterion {criterion!r}. "
+                f"Available: {', '.join(_FATIGUE_CRITERIA)}"
+            )
+        if criterion in ("soderberg", "asme_elliptic"):
+            return self.yield_strength
+        return self.ultimate_strength
+
+    def _validate_cycle_stress(self, stress_amplitude, mean_stress,
+                               criterion="goodman"):
+        """Validate a (sigma_a, sigma_m) pair for a criterion.
+
+        Checks sigma_a > 0 and 0 <= sigma_m < the criterion's mean-axis
+        intercept (Sut for goodman/gerber, Sy for soderberg/asme_elliptic).
+        Raises ValueError (also on an unknown criterion).
+        """
+        limit = self._mean_strength(criterion)
+        name = "Sy" if limit == self.yield_strength else "Sut"
         if stress_amplitude <= 0:
             raise ValueError("Stress amplitude must be strictly positive")
-        if not 0 <= mean_stress < self.ultimate_strength:
+        if not 0 <= mean_stress < limit:
             raise ValueError(
-                "Mean stress must be within [0, Sut) "
-                f"(Sut = {self.ultimate_strength} MPa)"
+                f"Mean stress must be within [0, {name}) "
+                f"({name} = {limit} MPa) for the {criterion} criterion"
             )
 
     def _find_load_case(self, index):
@@ -530,7 +726,7 @@ class Material:
         del self._load_cases[self._find_load_case(index)]
         return self
 
-    def miner_damage(self):
+    def miner_damage(self, criterion="goodman"):
         """
         Cumulative fatigue damage per Miner's rule (Eq. 6-58).
 
@@ -538,26 +734,43 @@ class Material:
         below the endurance limit contribute 0. Failure is predicted at
         D >= 1.
 
+        Args:
+            criterion (str): Mean-stress criterion used for each case's
+                cycles to failure (default: "goodman"). One of
+                ``_FATIGUE_CRITERIA``.
+
         Returns:
             float: Damage fraction for one pass through the load cases.
+
+        Raises:
+            ValueError: If ``criterion`` is unknown or a stored case is out
+                of range for it (e.g. sigma_m >= Sy under soderberg).
         """
         damage = 0.0
         for case in self._load_cases:
             n_failure = self.cycles_to_failure(case["stress_amplitude"],
-                                              case["mean_stress"])
+                                              case["mean_stress"], criterion)
             if math.isfinite(n_failure):
                 damage += case["cycles"] / n_failure
         return damage
 
-    def remaining_life(self):
+    def remaining_life(self, criterion="goodman"):
         """
         Repetitions of the whole load-case block until failure.
+
+        Args:
+            criterion (str): Mean-stress criterion (default: "goodman").
+                One of ``_FATIGUE_CRITERIA``.
 
         Returns:
             float: 1 / miner_damage(); ``math.inf`` if every case is
             below the endurance limit (zero damage).
+
+        Raises:
+            ValueError: If ``criterion`` is unknown or a stored case is out
+                of range for it.
         """
-        damage = self.miner_damage()
+        damage = self.miner_damage(criterion)
         if damage == 0:
             return math.inf
         return 1 / damage
@@ -689,7 +902,8 @@ class Material:
 
     def __repr__(self):
         return (
-            f"Material(base_material={self.base_material!r}, "
+            f"Material(name={self.name!r}, "
+            f"base_material={self.base_material!r}, "
             f"ultimate_strength={self.ultimate_strength}, "
             f"yield_strength={self.yield_strength})"
         )
