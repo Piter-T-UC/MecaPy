@@ -199,6 +199,14 @@ class TestCaliperDiscBrake:
         return CaliperDiscBrake(outer_radius=150, inner_radius=100,
                                 pad_angle=60, mu=0.35, n_pads=2)
 
+    def test_diameter_pair_matches_radius_pair(self):
+        """The caliper brake accepts a diameter pair equivalently (6.3)."""
+        by_diam = CaliperDiscBrake(outer_diameter=300, inner_diameter=200,
+                                   pad_angle=60, mu=0.35, n_pads=2)
+        assert by_diam.outer_radius == pytest.approx(150.0)
+        assert by_diam.effective_radius_uniform_wear == pytest.approx(
+            self.make_brake().effective_radius_uniform_wear)
+
     def test_effective_radii(self):
         brake = self.make_brake()
         assert brake.effective_radius_uniform_wear == pytest.approx(125.0)

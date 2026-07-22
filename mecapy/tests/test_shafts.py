@@ -6,6 +6,7 @@ import pytest
 from sympy import Symbol
 
 from mecapy import MechaElement
+from mecapy.materials import Material
 from mecapy.shafts import Shaft, SteppedShaft
 from mecapy.shafts.kt_data import get_kt_groove, get_kt_shoulder_fillet
 
@@ -71,24 +72,32 @@ class TestShaftLoading:
     def test_forces_chains_and_validates_range(self):
         """forces returns self and rejects an out-of-range loc."""
         shaft = Shaft(diameter=30.0, length=100.0)
-        assert shaft.forces(loc=50.0, fy=-10.0) is shaft
+        assert shaft.add_load(loc=50.0, fy=-10.0) is shaft
         with pytest.raises(ValueError):
-            shaft.forces(loc=200.0)
+            shaft.add_load(loc=200.0)
+
+    def test_forces_alias_is_deprecated(self):
+        """The old forces() name still works but warns, and chains."""
+        shaft = Shaft(diameter=30.0, length=100.0)
+        with pytest.warns(DeprecationWarning):
+            result = shaft.forces(loc=50.0, fy=-10.0)
+        assert result is shaft
+        assert shaft._point_loads[0][:3] == (50.0, 0, -10.0)
 
     def test_forces_accumulates(self):
-        """Repeated forces() calls add separate load-point rows."""
+        """Repeated add_load() calls add separate load-point rows."""
         shaft = Shaft(diameter=30.0, length=100.0)
-        shaft.forces(loc=20.0, fy=-10.0).forces(loc=80.0, mz=500.0)
+        shaft.add_load(loc=20.0, fy=-10.0).add_load(loc=80.0, mz=500.0)
         assert shaft._point_loads == [
-            (20.0, 0, -10.0, 0, 0, 0, 0),
-            (80.0, 0, 0, 0, 0, 0, 500.0),
+            (20.0, 0, -10.0, 0, 0, 0, 0, "rotating"),
+            (80.0, 0, 0, 0, 0, 0, 500.0, "rotating"),
         ]
 
     def test_forces_stores_fx_and_mx_without_diagram(self):
         """Axial force and torque are captured but don't feed a diagram yet (out of scope)."""
         shaft = Shaft(diameter=30.0, length=100.0)
-        shaft.forces(loc=50.0, fx=500.0, mx=20000.0)
-        assert shaft._point_loads == [(50.0, 500.0, 0, 0, 20000.0, 0, 0)]
+        shaft.add_load(loc=50.0, fx=500.0, mx=20000.0)
+        assert shaft._point_loads == [(50.0, 500.0, 0, 0, 20000.0, 0, 0, "rotating")]
 
     def test_fixed_support_cantilever_with_float_length_matches_hand_calc(self):
         """Cantilever (fixed root), combined y+z tip load, non-integer length.
@@ -104,7 +113,7 @@ class TestShaftLoading:
         length = 250.5
         shaft = Shaft(diameter=25.0, length=length)
         shaft.add_support(0, "fixed")
-        shaft.forces(loc=length, fy=-150.0, fz=80.0, fx=300.0, mx=15000.0)
+        shaft.add_load(loc=length, fy=-150.0, fz=80.0, fx=300.0, mx=15000.0)
 
         root_moment_y = shaft.bending_moment()["y"].subs(X, 0)
         root_moment_z = shaft.bending_moment()["z"].subs(X, 0)
@@ -114,14 +123,14 @@ class TestShaftLoading:
         assert abs(float(root_moment_z)) == pytest.approx(80.0 * length)
         assert float(tip_moment_y) == pytest.approx(0.0, abs=1e-6)
         # fx/mx are captured for later use, not diagrammed (out of scope)
-        assert shaft._point_loads == [(length, 300.0, -150.0, 80.0, 15000.0, 0, 0)]
+        assert shaft._point_loads == [(length, 300.0, -150.0, 80.0, 15000.0, 0, 0, "rotating")]
 
     def test_bending_moment_y_plane_matches_hand_calc(self):
         """Simply supported shaft, midspan point load in y: max moment = P*L/4."""
         length = 400.0
         shaft = Shaft(diameter=30.0, length=length)
         shaft.add_support(0, "pin").add_support(length, "pin")
-        shaft.forces(loc=length / 2, fy=-100.0)
+        shaft.add_load(loc=length / 2, fy=-100.0)
         moment_at_midspan = shaft.bending_moment()["y"].subs(X, length / 2)
         assert abs(float(moment_at_midspan)) == pytest.approx(100.0 * length / 4)
 
@@ -130,7 +139,7 @@ class TestShaftLoading:
         length = 400.0
         shaft = Shaft(diameter=30.0, length=length)
         shaft.add_support(0, "pin").add_support(length, "pin")
-        shaft.forces(loc=length / 2, fz=-100.0)
+        shaft.add_load(loc=length / 2, fz=-100.0)
         moment_at_midspan = shaft.bending_moment()["z"].subs(X, length / 2)
         assert abs(float(moment_at_midspan)) == pytest.approx(100.0 * length / 4)
 
@@ -139,7 +148,7 @@ class TestShaftLoading:
         length = 400.0
         shaft = Shaft(diameter=30.0, length=length)
         shaft.add_support(0, "pin").add_support(length, "pin")
-        shaft.forces(loc=length / 2, fy=-100.0)
+        shaft.add_load(loc=length / 2, fy=-100.0)
         vy = shaft.shear_force()["y"]
         left = float(vy.subs(X, length / 2 - 1))
         right = float(vy.subs(X, length / 2 + 1))
@@ -149,7 +158,7 @@ class TestShaftLoading:
         """No caching: second_moment (and so the beam it feeds) uses the live diameter."""
         shaft = Shaft(diameter=20.0, length=100.0)
         shaft.add_support(0, "pin").add_support(100.0, "pin")
-        shaft.forces(loc=50.0, fy=-10.0)
+        shaft.add_load(loc=50.0, fy=-10.0)
         first_second_moment = shaft.second_moment
         shaft.diameter = 40.0
         assert shaft.second_moment != pytest.approx(first_second_moment)
@@ -158,8 +167,8 @@ class TestShaftLoading:
     def test_axial_force_accumulates_along_x(self):
         """_axial_force_at is a running sum of fx at or before x (no reaction solved)."""
         shaft = Shaft(diameter=20.0, length=100.0)
-        shaft.forces(loc=30.0, fx=1000.0)
-        shaft.forces(loc=70.0, fx=2000.0)
+        shaft.add_load(loc=30.0, fx=1000.0)
+        shaft.add_load(loc=70.0, fx=2000.0)
         assert shaft._axial_force_at(0.0) == pytest.approx(0.0)
         assert shaft._axial_force_at(50.0) == pytest.approx(1000.0)
         assert shaft._axial_force_at(100.0) == pytest.approx(3000.0)
@@ -303,7 +312,7 @@ class TestShaftStressProfile:
         plain = Shaft(diameter=25.0, length=length)
         bent = Shaft(diameter=25.0, length=length)
         bent.add_support(0, "pin").add_support(length, "pin")
-        bent.forces(loc=length / 2, fy=-500.0)
+        bent.add_load(loc=length / 2, fy=-500.0)
 
         plain_mid = plain.stress_profile(torque, n=21)["nominal_stress"][10]
         bent_mid = bent.stress_profile(torque, n=21)["nominal_stress"][10]
@@ -317,7 +326,7 @@ class TestShaftStressProfile:
         """A single axial point load, no bending/torque: sigma = Fx/A, zero before it."""
         diameter = 20.0
         shaft = Shaft(diameter=diameter, length=100.0)
-        shaft.forces(loc=100.0, fx=5000.0)
+        shaft.add_load(loc=100.0, fx=5000.0)
         profile = shaft.stress_profile(n=11)
         area = math.pi * diameter ** 2 / 4
         assert profile["nominal_stress"][0] == pytest.approx(0.0, abs=1e-9)
@@ -328,7 +337,7 @@ class TestShaftStressProfile:
         diameter = 20.0
         shaft = Shaft(diameter=diameter, length=100.0)
         shaft.add_groove(position=50.0, diameter=14.0, radii=1.0)
-        shaft.forces(loc=0, fx=3000.0)  # active at the groove (loc=0 <= position=50)
+        shaft.add_load(loc=0, fx=3000.0)  # active at the groove (loc=0 <= position=50)
         peak = shaft.stress_profile(n=11)["peaks"][0]
         kt_axial = shaft.grooves[0][2]
         expected = kt_axial * 3000.0 / (math.pi * 14.0 ** 2 / 4)
@@ -477,7 +486,7 @@ class TestSteppedShaft:
         ss = SteppedShaft(base)
         small = Shaft(diameter=20.0, length=150.0)
         small.add_support(0, "fixed")
-        small.forces(loc=150.0, fy=-500.0)
+        small.add_load(loc=150.0, fy=-500.0)
         ss.add_shaft(small, "fillet", 3.0)
 
         fillet_peak = ss.stress_profile()["peaks"][0]
@@ -506,3 +515,228 @@ class TestSteppedShaftPlot:
         ss = SteppedShaft(base).add_shaft(Shaft(diameter=20.0, length=150.0), "fillet", 3.0)
         fig = ss.plot(torque=1.0e5, show=False)
         assert isinstance(fig, Figure)
+
+
+def _fatigue_shaft(material=None):
+    """Simply supported rotating shaft, central load, one central groove."""
+    mat = material or Material("steel", surface_finish="machined", reliability=0.99)
+    s = Shaft(diameter=30.0, length=100.0, material=mat)
+    s.add_support(0, "pin").add_support(100.0, "roller")
+    s.add_load(loc=50.0, fy=-1000.0)  # rotating (default) -> reversed bending
+    s.add_groove(position=50.0, diameter=20.0, radii=3.0)
+    return s, mat
+
+
+class TestShaftFatigue:
+    """Test cases for Shaft.fatigue_analysis (Shigley Ch. 7)."""
+
+    def test_von_mises_and_goodman_match_hand_calc(self):
+        """sigma_a, sigma_m and nf match the hand-computed DE-Goodman values."""
+        s, mat = _fatigue_shaft()
+        sec = s.fatigue_analysis(torque=50000.0, criterion="DE-Goodman")[50.0]
+        ma = 1000.0 * 100.0 / 4  # central load: M = P*L/4
+        d = 20.0
+        sa = 32 * sec["kf"] * ma / (math.pi * d ** 3)
+        sm = math.sqrt(3) * 16 * sec["kfs"] * 50000.0 / (math.pi * d ** 3)
+        assert sec["sigma_a"] == pytest.approx(sa)
+        assert sec["sigma_m"] == pytest.approx(sm)
+        nf = 1 / (sa / mat.endurance_limit + sm / mat.ultimate_strength)
+        assert sec["nf"] == pytest.approx(nf)
+
+    def test_rotating_case_has_zero_mean_bending_and_alt_torque(self):
+        """D5: a rotating shaft with steady torque gives Mm-driven-only mean
+        (pure torsion) and no alternating torque — the sigma_m comes solely
+        from the steady torque, sigma_a solely from reversed bending."""
+        s, _ = _fatigue_shaft()
+        # No torque at all: mean stress must vanish (Mm = 0, Tm = 0).
+        sec = s.fatigue_analysis(torque=0.0)[50.0]
+        assert sec["sigma_m"] == pytest.approx(0.0)
+        assert sec["sigma_a"] > 0
+
+    def test_static_load_becomes_mean_bending(self):
+        """A nature='static' load contributes mean (not alternating) bending."""
+        mat = Material("steel", surface_finish="machined", reliability=0.99)
+        s = Shaft(diameter=30.0, length=100.0, material=mat)
+        s.add_support(0, "pin").add_support(100.0, "roller")
+        s.add_load(loc=50.0, fy=-1000.0, nature="static")
+        s.add_groove(position=50.0, diameter=20.0, radii=3.0)
+        sec = s.fatigue_analysis(torque=0.0)[50.0]
+        # Pure steady bending, no alternating stress -> infinite fatigue life.
+        assert sec["sigma_a"] == pytest.approx(0.0)
+        assert sec["sigma_m"] > 0
+        assert sec["nf"] == math.inf
+
+    def test_governing_section_is_lowest_nf(self):
+        """With two grooves, both sections are reported; the thinner governs."""
+        s, _ = _fatigue_shaft()
+        s.add_groove(position=25.0, diameter=24.0, radii=2.0)  # milder groove
+        analysis = s.fatigue_analysis(torque=50000.0)
+        assert set(analysis) == {25.0, 50.0}
+        assert analysis[50.0]["nf"] < analysis[25.0]["nf"]
+
+    def test_each_criterion_positive_and_ordered(self):
+        """All four DE criteria give positive nf; Soderberg is most conservative."""
+        s, _ = _fatigue_shaft()
+        nf = {c: s.fatigue_analysis(torque=50000.0, criterion=c)[50.0]["nf"]
+              for c in ("DE-Soderberg", "DE-Goodman", "DE-Gerber",
+                        "DE-ASME-Elliptic")}
+        assert all(v > 0 for v in nf.values())
+        assert nf["DE-Soderberg"] <= nf["DE-Goodman"] <= nf["DE-Gerber"]
+
+    def test_kf_recomputes_when_strength_changes(self):
+        """Kf is recomputed each call: changing Sut (hence q) changes it."""
+        s, mat = _fatigue_shaft()
+        kf_before = s.fatigue_analysis(torque=50000.0)[50.0]["kf"]
+        mat.ultimate_strength = 1200
+        kf_after = s.fatigue_analysis(torque=50000.0)[50.0]["kf"]
+        assert kf_after != pytest.approx(kf_before)
+
+    def test_string_material_uses_default_endurance(self):
+        """A bare material name still yields a finite fatigue factor."""
+        s = Shaft(diameter=30.0, length=100.0, material="steel")
+        s.add_support(0, "pin").add_support(100.0, "roller")
+        s.add_load(loc=50.0, fy=-500.0)
+        s.add_groove(position=50.0, diameter=22.0, radii=3.0)
+        assert math.isfinite(s.fatigue_analysis(torque=20000.0)[50.0]["nf"])
+
+    def test_min_diameter_for_round_trips(self):
+        """Re-evaluating the criterion at min_diameter_for reproduces nf_target."""
+        s, mat = _fatigue_shaft()
+        sec = s.fatigue_analysis(torque=50000.0)[50.0]
+        d = s.min_diameter_for(2.0, torque=50000.0)
+        ma = 1000.0 * 100.0 / 4
+        sa = 32 * sec["kf"] * ma / (math.pi * d ** 3)
+        sm = math.sqrt(3) * 16 * sec["kfs"] * 50000.0 / (math.pi * d ** 3)
+        nf = 1 / (sa / mat.endurance_limit + sm / mat.ultimate_strength)
+        assert nf == pytest.approx(2.0, rel=1e-4)
+
+    def test_unknown_criterion_raises(self):
+        """An unknown criterion name raises ValueError."""
+        s, _ = _fatigue_shaft()
+        with pytest.raises(ValueError):
+            s.fatigue_analysis(criterion="bogus")
+
+    def test_bad_nature_raises(self):
+        """forces() rejects an unknown load nature."""
+        s = Shaft(diameter=30.0, length=100.0)
+        with pytest.raises(ValueError):
+            s.add_load(loc=10.0, fy=-1.0, nature="wobbly")
+
+    def test_min_diameter_non_positive_target_raises(self):
+        """A non-positive nf_target is rejected."""
+        s, _ = _fatigue_shaft()
+        with pytest.raises(ValueError):
+            s.min_diameter_for(0.0, torque=50000.0)
+
+    def test_min_diameter_without_grooves_raises(self):
+        """Sizing a shaft with no critical sections raises."""
+        s = Shaft(diameter=30.0, length=100.0,
+                  material=Material("steel"))
+        s.add_support(0, "pin").add_support(100.0, "roller")
+        s.add_load(loc=50.0, fy=-1000.0)
+        with pytest.raises(ValueError):
+            s.min_diameter_for(2.0, torque=50000.0)
+
+    def test_min_diameter_pure_static_section_raises(self):
+        """A governing section with no alternating stress cannot be sized."""
+        mat = Material("steel")
+        s = Shaft(diameter=30.0, length=100.0, material=mat)
+        s.add_support(0, "pin").add_support(100.0, "roller")
+        s.add_load(loc=50.0, fy=-1000.0, nature="static")
+        s.add_groove(position=50.0, diameter=20.0, radii=3.0)
+        with pytest.raises(ValueError):
+            s.min_diameter_for(2.0, torque=50000.0)
+
+
+class TestSteppedShaftFatigue:
+    """Test cases for SteppedShaft.fatigue_analysis (grooves + fillets)."""
+
+    def _stepped(self):
+        mat = Material("steel", surface_finish="machined", reliability=0.99)
+        base = Shaft(diameter=30.0, length=100.0, material=mat)
+        base.add_groove(position=50.0, diameter=25.0, radii=2.0)
+        small = Shaft(diameter=20.0, length=150.0, material=mat)
+        small.add_support(0, "fixed")
+        small.add_load(loc=150.0, fy=-500.0)  # rotating cantilever
+        return SteppedShaft(base).add_shaft(small, "fillet", 3.0), mat
+
+    def test_reports_groove_and_fillet_sections(self):
+        """Both the segment's groove (offset) and the fillet are analysed."""
+        st, _ = self._stepped()
+        analysis = st.fatigue_analysis(torque=1.0e5)
+        assert 50.0 in analysis      # base groove
+        assert 100.0 in analysis     # fillet at the transition
+
+    def test_fillet_bending_matches_smaller_segment(self):
+        """The fillet's alternating stress uses the smaller segment's moment."""
+        st, _ = self._stepped()
+        fp = st.fatigue_analysis(torque=1.0e5)[100.0]
+        ma = 500.0 * 150.0  # cantilever root moment on the 20 mm segment
+        sa = 32 * fp["kf"] * ma / (math.pi * 20.0 ** 3)
+        assert fp["sigma_a"] == pytest.approx(sa)
+
+    def test_min_diameter_for_sizes_governing_section(self):
+        """min_diameter_for returns a positive diameter for the fused shaft."""
+        st, _ = self._stepped()
+        d = st.min_diameter_for(1.5, torque=1.0e5)
+        assert d > 0
+
+
+class TestShaftLoadCases:
+    """CyclicLoadCases mixin on Shaft: the spectrum lives on the component."""
+
+    def _shaft(self):
+        return Shaft(diameter=30.0, length=100.0, material=Material("steel"))
+
+    def test_add_load_case_chains(self):
+        """add_load_case returns self so calls chain and accumulate."""
+        s = self._shaft()
+        assert s.add_load_case(200, 100, cycles=1e4).add_load_case(150, 0) is s
+        assert len(s.load_cases) == 2
+
+    def test_invalid_load_case_raises(self):
+        """Invalid amplitude, mean stress or cycles raise ValueError."""
+        s = self._shaft()
+        with pytest.raises(ValueError):
+            s.add_load_case(-10)
+        with pytest.raises(ValueError):
+            s.add_load_case(100, mean_stress=400)
+        with pytest.raises(ValueError):
+            s.add_load_case(100, cycles=0)
+
+    def test_edit_and_remove_by_label(self):
+        """edit/remove by label update, revalidate, and delete cases."""
+        s = self._shaft().add_load_case(200, 100, cycles=1e4, label="startup")
+        s.edit_load_case("startup", stress_amplitude=250)
+        assert s.load_cases[0]["stress_amplitude"] == 250
+        with pytest.raises(ValueError):
+            s.edit_load_case("startup", mean_stress=500)
+        s.remove_load_case("startup")
+        assert s.load_cases == []
+
+    def test_miner_damage_hand_sum(self):
+        """miner_damage equals the hand-summed n_i / N_i off the material S-N."""
+        s = (self._shaft().add_load_case(300, cycles=1e4)
+             .add_load_case(250, 50, cycles=5e4))
+        mat = Material("steel")
+        expected = (1e4 / mat.cycles_to_failure(300)
+                    + 5e4 / mat.cycles_to_failure(250, 50))
+        assert s.miner_damage() == pytest.approx(expected)
+        assert s.remaining_life() == pytest.approx(1 / s.miner_damage())
+
+    def test_shared_material_not_contaminated(self):
+        """Two shafts sharing one Material keep independent spectra."""
+        mat = Material("steel")
+        a = Shaft(diameter=30.0, length=100.0, material=mat).add_load_case(300, cycles=1e4)
+        b = Shaft(diameter=30.0, length=100.0, material=mat)
+        assert len(a.load_cases) == 1
+        assert b.load_cases == []
+        assert not hasattr(mat, "_load_cases")
+
+    def test_damage_recomputes_after_finish_change(self):
+        """Changing the material finish changes stored-case damage."""
+        mat = Material("steel")
+        s = Shaft(diameter=30.0, length=100.0, material=mat).add_load_case(300, cycles=1e4)
+        before = s.miner_damage()
+        mat.surface_finish = "as_forged"
+        assert s.miner_damage() != pytest.approx(before)

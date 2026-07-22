@@ -603,6 +603,61 @@ class BoltedUnion(MechaElement):
                 result[number] = float("inf")
         return result
 
+    def fatigue_safety_factor(self, external_load_max, external_load_min=0.0,
+                              endurance_limit=None):
+        """
+        Bolt fatigue safety factor for a fluctuating external load (Ch. 8).
+
+        For a per-bolt external tension cycling between ``external_load_min``
+        and ``external_load_max``, only the joint-constant fraction C reaches
+        the bolt. The alternating and mean bolt stresses are (Shigley
+        Eq. 8-35, with sigma_i = Fi/At the preload stress)::
+
+            sigma_a = C (P_max - P_min) / (2 At)
+            sigma_m = sigma_i + C (P_max + P_min) / (2 At)
+
+        and the Goodman fatigue factor along the load line from the preload
+        point (Eq. 8-38) is::
+
+            nf = Se (Sut - sigma_i) / (Sut sigma_a + Se (sigma_m - sigma_i))
+
+        Args:
+            external_load_max (float): Peak external tension per bolt in N.
+            external_load_min (float): Minimum external tension per bolt in
+                N (default 0, a released-to-zero repeated load).
+            endurance_limit (float): Fully corrected bolt endurance limit
+                Se in MPa (e.g. Shigley Table 8-17, which already includes
+                the thread stress concentration). Defaults to the bolt
+                material's Marin endurance limit — an approximation, since
+                that omits the rolled-thread Kf; pass the tabulated Se for a
+                real bolt.
+
+        Returns:
+            float: Fatigue safety factor; ``inf`` if there is no
+            alternating load.
+
+        Raises:
+            ValueError: If no plates are defined or
+                ``external_load_max < external_load_min``.
+        """
+        self._require_plates()
+        if external_load_max < external_load_min:
+            raise ValueError(
+                "external_load_max must be >= external_load_min")
+        at = self.bolt.stress_area
+        c = self.joint_constant
+        sigma_i = self.effective_preload / at
+        sut = self.bolt.tensile_strength
+        se = (endurance_limit if endurance_limit is not None
+              else self.bolt._fatigue_material().endurance_limit)
+        pa = (external_load_max - external_load_min) / 2.0
+        pm = (external_load_max + external_load_min) / 2.0
+        sigma_a = c * pa / at
+        if sigma_a <= 0:
+            return float("inf")
+        sigma_m = sigma_i + c * pm / at
+        return se * (sut - sigma_i) / (sut * sigma_a + se * (sigma_m - sigma_i))
+
     def slip_safety_factors(self, mu=DEFAULT_MU):
         """
         Safety factor against slip at the clamped interface per bolt.

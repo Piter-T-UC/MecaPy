@@ -30,8 +30,10 @@ class Flywheel(Wheel):
         outer_radius (float): Outer radius in m (alias of ``radius``).
         inner_radius (float): Bore radius in m (0 for a solid disc).
         thickness (float): Axial thickness in m, or None when the mass
-            was given directly.
-        mass (float): Mass in kg.
+            was given directly. Settable.
+        mass (float): Mass in kg. Derived from the geometry and material
+            density when built with ``thickness`` (recomputes if the radii
+            or thickness change); the stored input when built with ``mass``.
     """
 
     def __init__(self, outer_radius, inner_radius=0.0, thickness=None,
@@ -68,19 +70,50 @@ class Flywheel(Wheel):
         if mass is not None and mass <= 0:
             raise ValueError("Mass must be strictly positive")
 
+        # Wheel.__init__ assigns self.mass = mass, routed through the setter
+        # below (stores the input as-is; None means "derive from thickness").
         super().__init__(radius=outer_radius, material=material, mass=mass,
                          name=name)
         self.inner_radius = inner_radius
         self.thickness = thickness
-        if mass is None:
-            density = self.material_properties["density"]
-            self.mass = (density * math.pi
-                         * (outer_radius ** 2 - inner_radius ** 2) * thickness)
 
     @property
     def outer_radius(self):
         """float: Outer radius in m (alias of the inherited ``radius``)."""
         return self.radius
+
+    @property
+    def thickness(self):
+        """float or None: Axial thickness in m (None when mass was given)."""
+        return self._thickness
+
+    @thickness.setter
+    def thickness(self, value):
+        if value is not None and value <= 0:
+            raise ValueError("Thickness must be strictly positive")
+        self._thickness = value
+
+    @property
+    def mass(self):
+        """float: Mass in kg.
+
+        The stored input when built with ``mass``; otherwise derived from
+        the material density and the annular volume,
+        ``rho*pi*(ro^2 - ri^2)*thickness``, recomputed from the current
+        radii and thickness on every access.
+        """
+        if self._mass is not None:
+            return self._mass
+        density = self.material_properties["density"]
+        return (density * math.pi
+                * (self.outer_radius ** 2 - self.inner_radius ** 2)
+                * self.thickness)
+
+    @mass.setter
+    def mass(self, value):
+        if value is not None and value <= 0:
+            raise ValueError("Mass must be strictly positive")
+        self._mass = value
 
     @property
     def moment_of_inertia(self):

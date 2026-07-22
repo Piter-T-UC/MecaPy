@@ -15,7 +15,7 @@ import math
 
 from ..base import MechaElement
 from ..clutches.friction_data import get_friction_material
-from ..clutches.friction_interface import DEFAULT_MU
+from ..clutches.friction_interface import DEFAULT_MU, resolve_radii
 
 
 class CaliperDiscBrake(MechaElement):
@@ -38,16 +38,19 @@ class CaliperDiscBrake(MechaElement):
         lining (str): Friction-lining name, or None.
     """
 
-    def __init__(self, outer_radius, inner_radius, pad_angle, mu=None,
-                 n_pads=2, lining=None, material="steel", name=None):
+    def __init__(self, outer_radius=None, inner_radius=None, pad_angle=None,
+                 mu=None, n_pads=2, lining=None, material="steel", name=None,
+                 outer_diameter=None, inner_diameter=None):
         """
         Initialize a CaliperDiscBrake object.
 
         Args:
-            outer_radius (float): Pad outer radius ro in mm.
+            outer_radius (float): Pad outer radius ro in mm (canonical).
+                Give a radius pair OR a diameter pair.
             inner_radius (float): Pad inner radius ri in mm. Must be
                 smaller than ``outer_radius``.
             pad_angle (float): Pad angular span in degrees, in (0, 360).
+                Required.
             mu (float): Friction coefficient. Defaults to the lining's dry
                 value when ``lining`` is given, else to the clutch-module
                 default.
@@ -57,19 +60,20 @@ class CaliperDiscBrake(MechaElement):
                 :mod:`mecapy.clutches.friction_data`.
             material (str): Pad backing material type (default: "steel").
             name (str): Optional identifier for the brake.
+            outer_diameter (float): Outer diameter in mm (alternative to
+                ``outer_radius``).
+            inner_diameter (float): Inner diameter in mm.
 
         Raises:
-            ValueError: For non-positive or inverted radii, a pad angle
-                outside (0, 360), ``n_pads`` below 1, a friction
+            ValueError: For non-positive or inverted radii, a missing or
+                out-of-range pad angle, ``n_pads`` below 1, a friction
                 coefficient outside (0, 1.5), or an unknown lining name.
         """
         super().__init__(name=name, material=material)
-        if outer_radius <= 0:
-            raise ValueError("Outer radius must be strictly positive")
-        if inner_radius <= 0:
-            raise ValueError("Inner radius must be strictly positive")
-        if inner_radius >= outer_radius:
-            raise ValueError("Inner radius must be smaller than outer radius")
+        outer_radius, inner_radius = resolve_radii(
+            outer_radius, inner_radius, outer_diameter, inner_diameter)
+        if pad_angle is None:
+            raise ValueError("pad_angle is required")
         if not 0 < pad_angle < 360:
             raise ValueError("Pad angle must be in (0, 360) degrees")
         if not isinstance(n_pads, int) or n_pads < 1:
@@ -83,14 +87,58 @@ class CaliperDiscBrake(MechaElement):
         if not 0 < mu < 1.5:
             raise ValueError("Friction coefficient must be in (0, 1.5)")
 
-        self.outer_radius = outer_radius
+        self.outer_radius = outer_radius  # validating setters below
         self.inner_radius = inner_radius
         self.pad_angle = pad_angle
         self.mu = mu
         self.n_pads = n_pads
         self.lining = lining
 
-    # ---- Geometry ----
+    # ---- Geometry (radius canonical; diameter derived) ----
+
+    @property
+    def outer_radius(self):
+        """float: Pad outer radius ro in mm."""
+        return self._outer_radius
+
+    @outer_radius.setter
+    def outer_radius(self, value):
+        if value <= 0:
+            raise ValueError("Outer radius must be strictly positive")
+        if getattr(self, "_inner_radius", 0.0) >= value:
+            raise ValueError("Outer radius must be larger than inner radius")
+        self._outer_radius = value
+
+    @property
+    def inner_radius(self):
+        """float: Pad inner radius ri in mm."""
+        return self._inner_radius
+
+    @inner_radius.setter
+    def inner_radius(self, value):
+        if value <= 0:
+            raise ValueError("Inner radius must be strictly positive")
+        if value >= self._outer_radius:
+            raise ValueError("Inner radius must be smaller than outer radius")
+        self._inner_radius = value
+
+    @property
+    def outer_diameter(self):
+        """float: Pad outer diameter = 2*outer_radius in mm."""
+        return 2 * self._outer_radius
+
+    @outer_diameter.setter
+    def outer_diameter(self, value):
+        self.outer_radius = value / 2
+
+    @property
+    def inner_diameter(self):
+        """float: Pad inner diameter = 2*inner_radius in mm."""
+        return 2 * self._inner_radius
+
+    @inner_diameter.setter
+    def inner_diameter(self, value):
+        self.inner_radius = value / 2
 
     @property
     def pad_area(self):

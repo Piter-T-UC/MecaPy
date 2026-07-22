@@ -8,10 +8,10 @@ import math
 
 from ..base import MechaElement
 from .kt_data import get_kt_shoulder_fillet
-from .shaft import Shaft
+from .shaft import Shaft, _ShaftFatigue
 
 
-class SteppedShaft(MechaElement):
+class SteppedShaft(_ShaftFatigue, MechaElement):
     """
     A stepped shaft: two or more coaxial Shaft segments fused end-to-end
     by chaining :meth:`add_shaft`, e.g. a lathe-turned shaft with
@@ -217,6 +217,43 @@ class SteppedShaft(MechaElement):
 
         peaks.sort(key=lambda p: p["x"])
         return {"x": xs, "nominal_stress": nominal, "peaks": peaks}
+
+    # ---- Fatigue (Shigley Ch. 7) ----
+
+    def _fatigue_sections(self, torque, torque_alt, criterion):
+        """list: fatigue sections of the fused shaft — each segment's own
+        grooves (positions offset to the stitched axis) plus one section per
+        fillet, using the smaller adjoining segment's moments at the
+        boundary (the same rule ``stress_profile`` follows across a fillet).
+        """
+        self._base_criterion(criterion)  # validate early
+        boundaries = self.boundaries
+        sections = []
+        for i, segment in enumerate(self.segments):
+            for s in segment._fatigue_sections(torque, torque_alt, criterion):
+                s = dict(s)
+                s["position"] += boundaries[i]
+                sections.append(s)
+
+        for i, fillet in enumerate(self.fillets):
+            _number, (_D, d, radius), _kt_a, kt_b, kt_t = fillet
+            if self.segments[i].diameter == d:
+                smaller, local_x = self.segments[i], self.segments[i].length
+            else:
+                smaller, local_x = self.segments[i + 1], 0
+            material = smaller._fatigue_material()
+            Ma, Ta = smaller._alternating_loads_at(local_x, torque_alt)
+            Mm, Tm = smaller._mean_loads_at(local_x, torque)
+            kf = self._kf(kt_b, radius, "bending", material)
+            kfs = self._kf(kt_t, radius, "torsion", material)
+            nf, sa, sm = self._section_nf(d, Ma, Mm, Ta, Tm, kf, kfs,
+                                          material, criterion)
+            sections.append({
+                "position": boundaries[i + 1], "diameter": d, "Ma": Ma,
+                "Mm": Mm, "Ta": Ta, "Tm": Tm, "kf": kf, "kfs": kfs, "nf": nf,
+                "sigma_a": sa, "sigma_m": sm, "material": material,
+            })
+        return sections
 
     # ---- Visualization ----
 

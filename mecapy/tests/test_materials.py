@@ -241,131 +241,81 @@ class TestNotchSensitivity:
     """Test cases for the Neuber notch sensitivity factor q."""
 
     def test_q_matches_neuber_formula(self):
-        """q_radius equals 1/(1 + sqrt(a)/sqrt(r)) for the current loading."""
+        """q equals 1/(1 + sqrt(a)/sqrt(r)) for the current loading."""
         m = Material("steel")  # bending, Sut = 400 MPa
         expected = 1 / (1 + m.neuber_constant / math.sqrt(4))
-        assert m.q_radius(4) == pytest.approx(expected)
+        assert m.notch_sensitivity(4) == pytest.approx(expected)
 
     def test_q_known_value(self):
         """q for default steel (Sut 400 MPa), bending, r = 4 mm is ~0.778."""
-        assert Material("steel").q_radius(4) == pytest.approx(0.778, abs=1e-3)
+        assert Material("steel").notch_sensitivity(4) == pytest.approx(
+            0.778, abs=1e-3)
 
     def test_q_grows_toward_one_with_radius(self):
         """A larger notch radius gives a higher (more sensitive) q."""
         m = Material("steel")
-        assert m.q_radius(8) > m.q_radius(2)
+        assert m.notch_sensitivity(8) > m.notch_sensitivity(2)
 
     def test_q_in_unit_interval(self):
         """q stays within [0, 1)."""
-        q = Material("steel").q_radius(3)
+        q = Material("steel").notch_sensitivity(3)
         assert 0 <= q < 1
 
     def test_torsion_differs_from_bending(self):
         """Torsion uses the shear Neuber curve, giving a different q."""
         m = Material("steel")
-        q_bending = m.q_radius(4, loading="bending")
-        q_torsion = m.q_radius(4, loading="torsion")
+        q_bending = m.notch_sensitivity(4, loading="bending")
+        q_torsion = m.notch_sensitivity(4, loading="torsion")
         assert q_torsion != pytest.approx(q_bending)
 
     def test_axial_matches_bending_curve(self):
         """Axial shares the bending Neuber curve."""
         m = Material("steel")
-        assert m.q_radius(4, loading="axial") == pytest.approx(
-            m.q_radius(4, loading="bending"))
+        assert m.notch_sensitivity(4, loading="axial") == pytest.approx(
+            m.notch_sensitivity(4, loading="bending"))
 
     def test_explicit_loading_arg_wins(self):
         """An explicit loading arg overrides the instance's loading."""
         m = Material("steel", loading="torsion")
-        assert m.q_radius(4, loading="bending") == pytest.approx(
-            Material("steel", loading="bending").q_radius(4))
+        assert m.notch_sensitivity(4, loading="bending") == pytest.approx(
+            Material("steel", loading="bending").notch_sensitivity(4))
 
     def test_nonpositive_radius_raises(self):
         """A non-positive notch radius raises ValueError."""
         with pytest.raises(ValueError):
-            Material("steel").q_radius(0)
+            Material("steel").notch_sensitivity(0)
 
     def test_combined_returns_bending_and_shear_pair(self):
         """Combined loading returns (q, q_shear) for the two curves."""
         m = Material("steel")
-        q_pair = m.q_radius(4, loading="combined")
-        assert q_pair == (Material("steel").q_radius(4, loading="bending"),
-                          Material("steel").q_radius(4, loading="torsion"))
+        q_pair = m.notch_sensitivity(4, loading="combined")
+        assert q_pair == (
+            Material("steel").notch_sensitivity(4, loading="bending"),
+            Material("steel").notch_sensitivity(4, loading="torsion"))
 
     def test_combined_from_instance_loading(self):
         """A material with combined loading returns the pair by default."""
         m = Material("steel", loading="combined")
         ref = Material("steel")
-        assert m.q_radius(4) == (ref.q_radius(4, loading="bending"),
-                                 ref.q_radius(4, loading="torsion"))
+        assert m.notch_sensitivity(4) == (
+            ref.notch_sensitivity(4, loading="bending"),
+            ref.notch_sensitivity(4, loading="torsion"))
 
     def test_q_recomputes_after_strength_change(self):
         """Changing Sut changes the Neuber constant and hence q."""
         m = Material("steel")
-        q_before = m.q_radius(4)
+        q_before = m.notch_sensitivity(4)
         m.ultimate_strength = 1200
-        assert m.q_radius(4) != pytest.approx(q_before)
+        assert m.notch_sensitivity(4) != pytest.approx(q_before)
 
-
-class TestNotchSensitivityRecords:
-    """q_radius records each (radius, q) on the material's q/q_shear lists."""
-
-    def test_bending_recorded_on_q(self):
-        """A bending call appends a {radius, q} entry to q, not q_shear."""
-        m = Material("steel")
-        value = m.q_radius(4)
-        assert m.q == [{"radius": 4, "q": value}]
-        assert m.q_shear == []
-
-    def test_torsion_recorded_on_q_shear(self):
-        """A torsion call records on q_shear, leaving q empty."""
-        m = Material("steel")
-        value = m.q_radius(4, loading="torsion")
-        assert m.q_shear == [{"radius": 4, "q": value}]
-        assert m.q == []
-
-    def test_multiple_radii_accumulate(self):
-        """Different radii accumulate as separate entries."""
-        m = Material("steel")
-        m.q_radius(2)
-        m.q_radius(6)
-        assert [e["radius"] for e in m.q] == [2, 6]
-
-    def test_same_radius_updates_in_place(self):
-        """Re-querying a radius updates its entry rather than duplicating."""
-        m = Material("steel")
-        m.q_radius(4)
-        m.q_radius(4)
-        assert len(m.q) == 1
-
-    def test_combined_records_both_lists(self):
-        """Combined loading records on both q and q_shear."""
-        m = Material("steel")
-        q_b, q_t = m.q_radius(4, loading="combined")
-        assert m.q == [{"radius": 4, "q": q_b}]
-        assert m.q_shear == [{"radius": 4, "q": q_t}]
-
-    def test_q_returns_a_copy(self):
-        """Mutating the returned q list does not affect the material."""
-        m = Material("steel")
-        m.q_radius(4)
-        m.q.clear()
-        assert len(m.q) == 1
-
-    def test_q_settable_to_list(self):
-        """q can be replaced with a validated record list, or cleared."""
-        m = Material("steel")
-        m.q = [{"radius": 3, "q": 0.8}]
-        assert m.q == [{"radius": 3, "q": 0.8}]
-        m.q = None
-        assert m.q == []
-
-    def test_q_setter_validates_entries(self):
-        """A record with an out-of-range q or bad radius raises."""
-        m = Material("steel")
-        with pytest.raises(ValueError):
-            m.q = [{"radius": 3, "q": 1.5}]
-        with pytest.raises(ValueError):
-            m.q = [{"radius": 0, "q": 0.5}]
+    def test_notch_sensitivity_has_no_side_effects(self):
+        """Calling notch_sensitivity many times leaves the material identical."""
+        m = Material("steel", loading="combined")
+        before = vars(m).copy()
+        for _ in range(5):
+            m.notch_sensitivity(4)
+            m.notch_sensitivity(2, loading="torsion")
+        assert vars(m) == before
 
 
 class TestFatigueStressConcentration:
@@ -389,7 +339,7 @@ class TestFatigueStressConcentration:
     def test_callable_on_instance(self):
         """The method is reachable from an instance too."""
         m = Material("steel")
-        q = m.q_radius(4)
+        q = m.notch_sensitivity(4)
         assert m.fatigue_stress_concentration_factor(2.0, q) == pytest.approx(
             1 + q)
 
@@ -404,56 +354,19 @@ class TestFatigueStressConcentration:
             Material.fatigue_stress_concentration_factor(2.0, 1.5)
 
 
-class TestFatigueKfFromRecordedQ:
-    """fatigue_stress_concentration_factors uses the material's stored q."""
+class TestMaterialReuse:
+    """One Material instance shared by two consumers stays uncontaminated."""
 
-    def test_returns_kf_per_recorded_q(self):
-        """One Kf per recorded q, each equal to 1 + q*(Kt - 1)."""
+    def test_shared_instance_gives_independent_results(self):
+        """Two components using one Material get results from their own radii."""
         m = Material("steel")
-        q2 = m.q_radius(2)
-        q6 = m.q_radius(6)
-        kfs = m.fatigue_stress_concentration_factors(2.5)
-        assert kfs == pytest.approx([1 + q2 * 1.5, 1 + q6 * 1.5])
-
-    def test_results_kept_inside_material(self):
-        """Computed Kf values are stored on kf_notch, keyed by radius."""
-        m = Material("steel")
-        m.q_radius(4)
-        m.fatigue_stress_concentration_factors(2.0)
-        assert len(m.kf_notch) == 1
-        rec = m.kf_notch[0]
-        assert rec["radius"] == 4 and rec["loading"] == "bending"
-        assert rec["kf"] == pytest.approx(1 + rec["q"])
-
-    def test_combined_uses_both_lists(self):
-        """Combined loading produces a Kf for both q and q_shear entries."""
-        m = Material("steel")
-        m.q_radius(4, loading="combined")
-        kfs = m.fatigue_stress_concentration_factors(2.0, loading="combined")
-        assert len(kfs) == 2
-        assert {r["loading"] for r in m.kf_notch} == {"bending", "torsion"}
-
-    def test_kf_notch_returns_copy(self):
-        """Mutating the returned kf_notch list does not affect the material."""
-        m = Material("steel")
-        m.q_radius(4)
-        m.fatigue_stress_concentration_factors(2.0)
-        m.kf_notch.clear()
-        assert len(m.kf_notch) == 1
-
-    def test_recompute_updates_existing_record(self):
-        """Re-running with a new Kt updates the record in place."""
-        m = Material("steel")
-        m.q_radius(4)
-        m.fatigue_stress_concentration_factors(2.0)
-        m.fatigue_stress_concentration_factors(3.0)
-        assert len(m.kf_notch) == 1
-        assert m.kf_notch[0]["kt"] == 3.0
-
-    def test_no_recorded_q_raises(self):
-        """Asking for Kf before any q is recorded raises ValueError."""
-        with pytest.raises(ValueError):
-            Material("steel").fatigue_stress_concentration_factors(2.0)
+        # Consumer A sizes a Kf at r = 4 mm, consumer B at r = 2 mm.
+        kf_a = m.fatigue_stress_concentration_factor(2.5, m.notch_sensitivity(4))
+        kf_b = m.fatigue_stress_concentration_factor(2.5, m.notch_sensitivity(2))
+        # B's later use must not have altered what A computed, and vice versa.
+        assert kf_a == pytest.approx(
+            m.fatigue_stress_concentration_factor(2.5, m.notch_sensitivity(4)))
+        assert kf_a != pytest.approx(kf_b)
 
 
 class TestRecompute:
@@ -481,6 +394,15 @@ class TestRecompute:
         se = m.endurance_limit
         m.kf = 0.5
         assert m.endurance_limit == pytest.approx(0.5 * se)
+
+    def test_changing_ultimate_strength_rederives_fatigue_chain(self):
+        """Changing Sut re-derives neuber_constant, Se and the S-N curve."""
+        m = Material("steel")
+        neuber, se, sn_a = m.neuber_constant, m.endurance_limit, m.sn_a
+        m.ultimate_strength = 1200
+        assert m.neuber_constant != pytest.approx(neuber)
+        assert m.endurance_limit != pytest.approx(se)
+        assert m.sn_a != pytest.approx(sn_a)
 
     def test_setters_revalidate(self):
         """Setting an invalid value after construction still raises."""
@@ -562,8 +484,8 @@ class TestSNCurve:
             m.cycles_to_failure(100, mean_stress=400)
 
 
-class TestLoadCases:
-    """Test cases for load cases, Goodman and Miner's rule."""
+class TestGoodmanSafetyFactor:
+    """Material.goodman_safety_factor stays on Material (pure, no state)."""
 
     def test_goodman_safety_factor(self):
         """The Goodman safety factor follows Eq. 6-46."""
@@ -572,81 +494,16 @@ class TestLoadCases:
         expected = 1 / (100 / m.endurance_limit + 50 / m.ultimate_strength)
         assert sf == pytest.approx(expected)
 
-    def test_add_load_case_chains(self):
-        """add_load_case returns self so calls chain."""
+
+class TestMaterialHasNoLoadState:
+    """Load cases live on components, not on Material (Phase 3, D2)."""
+
+    def test_material_has_no_load_case_api(self):
+        """Material no longer accumulates load cases or Miner damage."""
         m = Material("steel")
-        result = m.add_load_case(200, 100, cycles=1e4).add_load_case(150, 0)
-        assert result is m
-        assert len(m.load_cases) == 2
-
-    def test_invalid_load_case_raises(self):
-        """Invalid amplitude, mean stress or cycles raise ValueError."""
-        m = Material("steel")
-        with pytest.raises(ValueError):
-            m.add_load_case(-10)
-        with pytest.raises(ValueError):
-            m.add_load_case(100, mean_stress=400)
-        with pytest.raises(ValueError):
-            m.add_load_case(100, cycles=0)
-
-    def test_edit_by_label(self):
-        """edit_load_case by label updates and revalidates the case."""
-        m = Material("steel").add_load_case(200, 100, cycles=1e4,
-                                            label="startup")
-        m.edit_load_case("startup", stress_amplitude=250)
-        assert m.load_cases[0]["stress_amplitude"] == 250
-        with pytest.raises(ValueError):
-            m.edit_load_case("startup", mean_stress=500)
-
-    def test_edit_unknown_field_raises(self):
-        """Editing an unknown load-case field raises ValueError."""
-        m = Material("steel").add_load_case(200)
-        with pytest.raises(ValueError):
-            m.edit_load_case(0, frequency=50)
-
-    def test_remove_by_index_and_label(self):
-        """remove_load_case works by position and by label."""
-        m = (Material("steel").add_load_case(200, label="a")
-             .add_load_case(150, label="b"))
-        m.remove_load_case("a")
-        assert len(m.load_cases) == 1
-        m.remove_load_case(0)
-        assert m.load_cases == []
-
-    def test_missing_case_raises(self):
-        """An unknown label or out-of-range index raises ValueError."""
-        m = Material("steel")
-        with pytest.raises(ValueError):
-            m.remove_load_case("ghost")
-        with pytest.raises(ValueError):
-            m.edit_load_case(3, cycles=10)
-
-    def test_miner_damage_hand_sum(self):
-        """miner_damage equals the hand-summed n_i / N_i."""
-        m = (Material("steel").add_load_case(300, cycles=1e4)
-             .add_load_case(250, 50, cycles=5e4))
-        expected = (1e4 / m.cycles_to_failure(300)
-                    + 5e4 / m.cycles_to_failure(250, 50))
-        assert m.miner_damage() == pytest.approx(expected)
-
-    def test_remaining_life_inverse_of_damage(self):
-        """remaining_life is 1 / miner_damage for finite damage."""
-        m = Material("steel").add_load_case(300, cycles=1e4)
-        assert m.remaining_life() == pytest.approx(1 / m.miner_damage())
-
-    def test_infinite_life_cases_contribute_zero(self):
-        """Cases below the endurance limit give zero damage, infinite life."""
-        m = Material("steel")
-        m.add_load_case(m.endurance_limit * 0.5, cycles=1e9)
-        assert m.miner_damage() == 0
-        assert m.remaining_life() == math.inf
-
-    def test_damage_recomputes_after_finish_change(self):
-        """Changing the surface finish changes the damage of stored cases."""
-        m = Material("steel").add_load_case(300, cycles=1e4)
-        damage_machined = m.miner_damage()
-        m.surface_finish = "as_forged"
-        assert m.miner_damage() != pytest.approx(damage_machined)
+        for attr in ("add_load_case", "miner_damage", "remaining_life",
+                     "load_cases"):
+            assert not hasattr(m, attr)
 
 
 class TestMeanStressCriteria:
@@ -772,8 +629,9 @@ class TestPlots:
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
-        m = Material("steel").add_load_case(300, cycles=1e4, label="startup")
-        fig = m.plot_sn_curve(show=False)
+        m = Material("steel")
+        cases = [{"stress_amplitude": 300, "mean_stress": 0, "label": "startup"}]
+        fig = m.plot_sn_curve(load_cases=cases, show=False)
         assert isinstance(fig, matplotlib.figure.Figure)
         plt.close(fig)
 
@@ -783,7 +641,8 @@ class TestPlots:
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
-        m = Material("steel").add_load_case(150, 100, label="startup")
-        fig = m.plot_goodman(show=False)
+        m = Material("steel")
+        cases = [{"stress_amplitude": 150, "mean_stress": 100, "label": "startup"}]
+        fig = m.plot_goodman(load_cases=cases, show=False)
         assert isinstance(fig, matplotlib.figure.Figure)
         plt.close(fig)

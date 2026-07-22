@@ -80,18 +80,6 @@ class JournalBearing(MechaElement):
                 under-specified lubricant.
         """
         super().__init__(name=name, material=material)
-        if radius <= 0:
-            raise ValueError("Radius must be strictly positive")
-        if clearance <= 0:
-            raise ValueError("Clearance must be strictly positive")
-        if clearance >= radius:
-            raise ValueError("Clearance must be smaller than the radius")
-        if length <= 0:
-            raise ValueError("Length must be strictly positive")
-        if speed <= 0:
-            raise ValueError("Speed must be strictly positive")
-        if load <= 0:
-            raise ValueError("Load must be strictly positive")
         if viscosity is not None and (sae_grade is not None or temperature is not None):
             raise ValueError(
                 "Specify either viscosity or sae_grade+temperature, not both"
@@ -103,14 +91,95 @@ class JournalBearing(MechaElement):
                     "sae_grade= and temperature="
                 )
             viscosity = sae_viscosity(sae_grade, temperature)
-        if viscosity <= 0:
-            raise ValueError("Viscosity must be strictly positive")
+        # All six inputs go through the validating setters below, so mutating
+        # any of them after construction re-checks it (and clearance < radius).
         self.radius = radius
         self.clearance = clearance
         self.length = length
         self.speed = speed
         self.load = load
         self.viscosity = viscosity
+
+    # ---- Settable primary inputs (validate; keep clearance < radius) ----
+
+    @property
+    def radius(self):
+        """float: Journal radius r in mm."""
+        return self._radius
+
+    @radius.setter
+    def radius(self, value):
+        if value <= 0:
+            raise ValueError("Radius must be strictly positive")
+        if value <= getattr(self, "_clearance", 0.0):
+            raise ValueError("Radius must be larger than the clearance")
+        self._radius = value
+
+    @property
+    def clearance(self):
+        """float: Radial clearance c in mm."""
+        return self._clearance
+
+    @clearance.setter
+    def clearance(self, value):
+        if value <= 0:
+            raise ValueError("Clearance must be strictly positive")
+        if value >= self._radius:
+            raise ValueError("Clearance must be smaller than the radius")
+        self._clearance = value
+
+    @property
+    def length(self):
+        """float: Bearing length l in mm."""
+        return self._length
+
+    @length.setter
+    def length(self, value):
+        if value <= 0:
+            raise ValueError("Length must be strictly positive")
+        self._length = value
+
+    @property
+    def speed(self):
+        """float: Journal speed N in rev/s."""
+        return self._speed
+
+    @speed.setter
+    def speed(self, value):
+        if value <= 0:
+            raise ValueError("Speed must be strictly positive")
+        self._speed = value
+
+    @property
+    def load(self):
+        """float: Radial load W in N."""
+        return self._load
+
+    @load.setter
+    def load(self, value):
+        if value <= 0:
+            raise ValueError("Load must be strictly positive")
+        self._load = value
+
+    @property
+    def viscosity(self):
+        """float: Absolute lubricant viscosity in mPa*s."""
+        return self._viscosity
+
+    @viscosity.setter
+    def viscosity(self, value):
+        if value <= 0:
+            raise ValueError("Viscosity must be strictly positive")
+        self._viscosity = value
+
+    @property
+    def speed_rpm(self):
+        """float: Journal speed in rev/min.
+
+        Convenience view of :attr:`speed` (which the Sommerfeld/Petroff
+        relations use in **rev/s**); ``speed_rpm = 60 * speed``.
+        """
+        return 60.0 * self._speed
 
     @property
     def l_over_d(self):

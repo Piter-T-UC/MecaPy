@@ -561,3 +561,94 @@ class TestMinimumBolt:
                            forces=(1e8, 0.0, 0.0))
         with pytest.raises(ValueError):
             huge.minimum_bolt(mu=0.2)
+
+
+class TestBoltLoadCases:
+    """CyclicLoadCases mixin on Bolt (Phase 3, D2)."""
+
+    def test_miner_uses_property_class_strength(self):
+        """The bolt's S-N curve uses its ISO 898-1 tensile strength."""
+        bolt = Bolt(size="M10", length=50.0, property_class="8.8")
+        mat = bolt._fatigue_material()
+        assert mat.ultimate_strength == pytest.approx(bolt.tensile_strength)
+        bolt.add_load_case(200, cycles=1e4).add_load_case(150, 50, cycles=5e4)
+        expected = (1e4 / mat.cycles_to_failure(200)
+                    + 5e4 / mat.cycles_to_failure(150, 50))
+        assert bolt.miner_damage() == pytest.approx(expected)
+
+    def test_load_case_chaining_and_removal(self):
+        """add_load_case chains and returns the bolt; remove deletes it."""
+        bolt = Bolt(size="M12", length=60.0)
+        assert bolt.add_load_case(180, label="a") is bolt
+        bolt.remove_load_case("a")
+        assert bolt.load_cases == []
+
+
+class TestBoltMutableInputs:
+    """D1: size and property_class are mutable and recompute their lookups."""
+
+    def test_changing_size_recomputes_geometry(self):
+        """Reassigning size updates diameter/pitch/stress area from the table."""
+        bolt = Bolt(size="M10", length=50.0)
+        d10, a10 = bolt.nominal_diameter, bolt.stress_area
+        bolt.size = "M16"
+        assert bolt.nominal_diameter != pytest.approx(d10)
+        assert bolt.nominal_diameter == pytest.approx(Bolt("M16", 50.0).nominal_diameter)
+        assert bolt.stress_area != pytest.approx(a10)
+
+    def test_changing_property_class_recomputes_strength(self):
+        """Reassigning property_class updates proof/yield/tensile strengths."""
+        bolt = Bolt(size="M10", length=50.0, property_class="8.8")
+        assert bolt.yield_strength == 640.0
+        bolt.property_class = "10.9"
+        assert bolt.yield_strength == pytest.approx(
+            Bolt("M10", 50.0, property_class="10.9").yield_strength)
+        assert bolt.proof_load == pytest.approx(bolt.proof_strength * bolt.stress_area)
+
+    def test_invalid_reassignment_raises(self):
+        """Unknown size or property class is rejected on assignment."""
+        bolt = Bolt(size="M10", length=50.0)
+        with pytest.raises(ValueError):
+            bolt.size = "M999"
+        with pytest.raises(ValueError):
+            bolt.property_class = "42.0"
+
+    def test_custom_bolt_size_is_synthesized(self):
+        """A custom bolt reports an M<d>x<p> designation and 'shigley' area."""
+        bolt = Bolt(length=50.0, diameter=12.0, pitch=1.25)
+        assert bolt.size == "M12x1.25"
+        assert bolt.stress_area_method == "shigley"
+        with pytest.raises(ValueError):
+            bolt.stress_area_method = "table"  # no table size backing it
+
+
+class TestBoltedUnionFatigue:
+    """Bolted-joint fatigue (Phase 7.1, Shigley Ch. 8)."""
+
+    def test_fatigue_factor_follows_goodman_preload_line(self):
+        """nf matches Eq. 8-38 wired from C, Fi, At, Sut and Se."""
+        bolt = Bolt("M10", 50.0, property_class="8.8")
+        union = BoltedUnion(bolt, square_pattern(), plates=steel_plates())
+        se, p = 140.0, 10000.0
+        at = bolt.stress_area
+        c = union.joint_constant
+        sigma_i = union.effective_preload / at
+        sut = bolt.tensile_strength
+        sigma_a = c * (p / 2) / at
+        sigma_m = sigma_i + c * (p / 2) / at
+        expected = se * (sut - sigma_i) / (sut * sigma_a + se * (sigma_m - sigma_i))
+        assert union.fatigue_safety_factor(p, endurance_limit=se) == pytest.approx(expected)
+
+    def test_constant_load_gives_infinite_life(self):
+        """No alternating component -> infinite fatigue factor."""
+        union = BoltedUnion(Bolt("M10", 50.0), square_pattern(), plates=steel_plates())
+        assert union.fatigue_safety_factor(5000.0, external_load_min=5000.0) == float("inf")
+
+    def test_requires_plates_and_valid_range(self):
+        """No plates, or max < min, is rejected."""
+        bolt = Bolt("M10", 50.0)
+        with pytest.raises(ValueError):
+            BoltedUnion(bolt, square_pattern()).fatigue_safety_factor(1000.0)
+        union = BoltedUnion(bolt, square_pattern(), plates=steel_plates())
+        with pytest.raises(ValueError):
+            union.fatigue_safety_factor(100.0, external_load_min=200.0)

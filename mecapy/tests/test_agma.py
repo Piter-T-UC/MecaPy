@@ -244,6 +244,41 @@ class TestRatingValidation:
         assert rating.ZI > spur_zi
 
 
+class TestRatingIsLazy:
+    """D3: the rating recomputes from its inputs and never caches (Phase 4)."""
+
+    def _rating(self):
+        pinion = SpurGear(17, module=2.5, face_width=40.0)
+        gear = SpurGear(52, module=2.5, face_width=40.0)
+        return AGMARating(pinion, gear, power_kw=3.0, pinion_speed_rpm=1800,
+                          hardness_HB=240), pinion, gear
+
+    def test_safety_factor_recomputes_on_face_width_change(self):
+        """Narrowing the governing (narrower) member lowers the SFs."""
+        rating, pinion, gear = self._rating()
+        sf0, sh0 = rating.SF_pinion, rating.SH
+        gear.face_width = 25.0  # now the narrower member governs b
+        assert rating.face_width == 25.0
+        assert rating.SF_pinion < sf0
+        assert rating.SH < sh0
+
+    def test_stress_recomputes_on_overload_change(self):
+        """Raising the overload factor Ko raises the bending stress."""
+        rating, _, _ = self._rating()
+        sigma0 = rating.bending_stress_pinion
+        rating.Ko = 1.5
+        assert rating.bending_stress_pinion == pytest.approx(1.5 * sigma0)
+
+    def test_yj_override_used_verbatim(self):
+        """A YJ override is returned as-is, not recomputed."""
+        pinion = SpurGear(17, module=2.5, face_width=40.0)
+        gear = SpurGear(52, module=2.5, face_width=40.0)
+        rating = AGMARating(pinion, gear, power_kw=3.0, pinion_speed_rpm=1800,
+                            hardness_HB=240, YJ_pinion=0.42, YJ_gear=0.48)
+        assert rating.YJ_pinion == 0.42
+        assert rating.YJ_gear == 0.48
+
+
 class TestGearMaterial:
     """A Material subclass carrying Brinell hardness and AGMA grade."""
 

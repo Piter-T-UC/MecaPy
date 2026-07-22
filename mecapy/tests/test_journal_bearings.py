@@ -168,6 +168,18 @@ class TestJournalBearing:
         journal = make_journal(viscosity=None, sae_grade=30, temperature=70.0)
         assert isclose(journal.viscosity, viscosity(30, 70.0), rel_tol=1e-9)
 
+    def test_setters_revalidate_and_keep_invariant(self):
+        """Mutating an input after construction re-runs its validation."""
+        journal = make_journal()
+        journal.load = 5000.0  # valid change accepted
+        assert journal.load == 5000.0
+        with pytest.raises(ValueError):
+            journal.clearance = journal.radius  # clearance must stay < radius
+        with pytest.raises(ValueError):
+            journal.speed = 0
+        with pytest.raises(ValueError):
+            journal.viscosity = -1
+
     def test_l_over_d(self):
         """l/d = length / (2 * radius)."""
         assert isclose(make_journal().l_over_d, 1.0, rel_tol=1e-9)

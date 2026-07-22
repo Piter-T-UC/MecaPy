@@ -158,6 +158,20 @@ class TestWeldedUnion:
         sf = u.safety_factors()[0]
         assert isclose(sf, (0.30 * 482.0) / sigma_eq, rel_tol=1e-9)
 
+    def test_base_metal_and_governing_safety_factors(self):
+        """The base-metal limit (0.40*Sy on the leg) is added and governs
+        when weaker than the electrode throat limit."""
+        weld = Weld(WeldLine((0, 0), (0, 100)), size=6.0, electrode="E70",
+                    material="steel")  # Sy = 250 MPa
+        u = WeldedUnion([weld], forces=(0, -6000, 0))
+        _, _, sigma_eq = u.max_stress()
+        # Base metal shears on the leg: stress = peak * throat/size = 0.707*peak.
+        base_sf = u.base_metal_safety_factors()[0]
+        assert isclose(base_sf, (0.40 * 250.0) / (sigma_eq * weld.base_metal_factor),
+                       rel_tol=1e-9)
+        governing = u.governing_safety_factors()[0]
+        assert isclose(governing, min(u.safety_factors()[0], base_sf), rel_tol=1e-12)
+
     def test_circle_group(self):
         """A single circular weld: Ju = 2*pi*r^3, torsion gives shear."""
         u = WeldedUnion(

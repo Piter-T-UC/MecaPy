@@ -318,9 +318,17 @@ class AGMARating:
     """
     AGMA bending and pitting rating of an external cylindrical mesh.
 
-    Evaluates all modification factors and stresses eagerly at
-    construction; results are plain attributes. The first gear is the
-    pinion (driver); the mate may be a gear or a :class:`Rack`.
+    Inputs are validated and stored at construction; every modification
+    factor, stress and safety factor is a lazy ``@property`` recomputed
+    from the pinion, gear and rating inputs on each access, so mutating a
+    gear (teeth, face width, material) or a rating factor (Ko, Ks, ...) is
+    reflected immediately — nothing derived is ever cached and stale. The
+    first gear is the pinion (driver); the mate may be a gear or a
+    :class:`Rack`.
+
+    The ``YJ_pinion``/``YJ_gear`` overrides are used verbatim when given
+    (not recomputed); otherwise the geometry factor is computed from the
+    tooth counts and helix angle. ``St``/``Sc`` behave the same way.
 
     Note: the digitized J-factor and Lewis tables assume standard
     (profile shift x = 0) tooth proportions; ratings for
@@ -416,11 +424,14 @@ class AGMARating:
             raise ValueError(
                 "Give exactly one of 'power_kw' or 'tangential_force'"
             )
-        # Fall back to a GearMaterial on the pinion for the hardness data.
-        if hardness_HB is None and isinstance(pinion.material, GearMaterial):
-            hardness_HB = pinion.material.hardness_HB
-            grade = pinion.material.grade
-        if hardness_HB is None and (St is None or Sc is None):
+        if tangential_force is not None and tangential_force <= 0:
+            raise ValueError("Tangential force must be strictly positive")
+        # Resolve the hardness/grade for the eager allowables check only
+        # (the properties re-resolve it lazily from the gear material).
+        resolved_hardness = hardness_HB
+        if resolved_hardness is None and isinstance(pinion.material, GearMaterial):
+            resolved_hardness = pinion.material.hardness_HB
+        if resolved_hardness is None and (St is None or Sc is None):
             raise ValueError(
                 "Give 'hardness_HB' (through-hardened steel fits) or "
                 "explicit 'St' and 'Sc' allowable stress numbers in MPa"
@@ -432,7 +443,12 @@ class AGMARating:
             )
         if temperature_celsius is not None:
             temperature_factor = _temperature_factor_from_temp(temperature_celsius)
+        if not isinstance(gear, Rack) and gear.teeth < pinion.teeth:
+            raise ValueError(
+                "The pinion must be the smaller member (gear ratio >= 1)"
+            )
 
+        # Store inputs only; everything derived is a lazy property below.
         self.pinion = pinion
         self.gear = gear
         self.Ko = Ko
@@ -440,103 +456,235 @@ class AGMARating:
         self.ZR = ZR
         self.KB = KB
         self.temperature_factor = temperature_factor
+        self._Qv = Qv
+        self._life_cycles = life_cycles
+        self._reliability = reliability
+        self._condition = condition
+        self._crowned = crowned
+        self._hardness_HB = hardness_HB
+        self._grade = grade
+        self._gear_hardness_HB = gear_hardness_HB
+        self._St = St
+        self._Sc = Sc
+        self._YJ_pinion = YJ_pinion
+        self._YJ_gear = YJ_gear
+        self._power_kw = power_kw
+        self._pinion_speed_rpm = pinion_speed_rpm
+        self._tangential_force = tangential_force
 
-        is_rack = isinstance(gear, Rack)
-        mating_teeth = "rack" if is_rack else gear.teeth
-        # A rack is kinematically an infinite gear: mG -> infinity;
-        # use a large finite ratio for the I factor.
-        self.gear_ratio = 1e6 if is_rack else gear.teeth / pinion.teeth
-        if self.gear_ratio < 1:
+    # ---- Geometry / load (recomputed, never cached) ----
+
+    @property
+    def is_rack(self):
+        """bool: Whether the mating member is a :class:`Rack`."""
+        return isinstance(self.gear, Rack)
+
+    @property
+    def gear_ratio(self):
+        """float: mG = gear teeth / pinion teeth (1e6 for a rack)."""
+        if self.is_rack:
+            return 1e6
+        ratio = self.gear.teeth / self.pinion.teeth
+        if ratio < 1:
             raise ValueError(
                 "The pinion must be the smaller member (gear ratio >= 1)"
             )
+        return ratio
 
-        # Effective face width: the narrower of the two members.
-        b = pinion.face_width
-        if not is_rack and gear.face_width is not None:
-            b = min(b, gear.face_width)
-        self.face_width = b
+    @property
+    def face_width(self):
+        """float: Effective face width b in mm (the narrower member)."""
+        b = self.pinion.face_width
+        if not self.is_rack and self.gear.face_width is not None:
+            b = min(b, self.gear.face_width)
+        return b
 
-        # Load and velocity.
-        self.pitch_line_velocity = pinion.pitch_line_velocity(pinion_speed_rpm)
-        if tangential_force is not None:
-            if tangential_force <= 0:
-                raise ValueError("Tangential force must be strictly positive")
-            self.Ft = tangential_force
-        else:
-            self.Ft = pinion.tangential_force(power_kw, pinion_speed_rpm)
+    @property
+    def pitch_line_velocity(self):
+        """float: Pitch-line velocity in m/s."""
+        return self.pinion.pitch_line_velocity(self._pinion_speed_rpm)
 
-        # Modification factors.
-        self.Kv = dynamic_factor(self.pitch_line_velocity, Qv)
-        self.KH = load_distribution_factor(b, pinion.pitch_diameter,
-                                           condition=condition,
-                                           crowned=crowned)
-        self.YJ_pinion = (YJ_pinion if YJ_pinion is not None else
-                          agma_data.geometry_factor_J(
-                              pinion.teeth, mating_teeth,
-                              pinion.helix_angle))
-        if is_rack:
-            self.YJ_gear = None
-        else:
-            self.YJ_gear = (YJ_gear if YJ_gear is not None else
-                            agma_data.geometry_factor_J(
-                                gear.teeth, pinion.teeth,
-                                gear.helix_angle))
-        self.ZI = geometry_factor_I(pinion, gear=None if is_rack else gear)
-        gear_props = (pinion.material_properties if is_rack
-                      else gear.material_properties)
-        self.ZE = elastic_coefficient(pinion.material_properties, gear_props)
+    @property
+    def Ft(self):
+        """float: Tangential force in N (given, or from power and speed)."""
+        if self._tangential_force is not None:
+            return self._tangential_force
+        return self.pinion.tangential_force(self._power_kw,
+                                            self._pinion_speed_rpm)
 
-        # Life, reliability and hardness factors.
-        self.YN = bending_life_factor(life_cycles)
-        self.ZN = contact_life_factor(life_cycles)
-        self.YZ = agma_data.reliability_factor(reliability)
-        # Fall back to a GearMaterial on the gear for its hardness (ZW).
-        if (gear_hardness_HB is None and not is_rack
-                and isinstance(gear.material, GearMaterial)):
-            gear_hardness_HB = gear.material.hardness_HB
-        if gear_hardness_HB is not None and hardness_HB is not None:
-            self.ZW = hardness_ratio_factor(hardness_HB, gear_hardness_HB,
-                                            self.gear_ratio)
-        else:
-            self.ZW = 1.0
+    # ---- Modification factors ----
 
-        # Allowable stress numbers.
-        self.St = (St if St is not None else
-                   agma_data.allowable_bending_stress(hardness_HB, grade))
-        self.Sc = (Sc if Sc is not None else
-                   agma_data.allowable_contact_stress(hardness_HB, grade))
+    @property
+    def Kv(self):
+        """float: Dynamic factor (see :func:`dynamic_factor`)."""
+        return dynamic_factor(self.pitch_line_velocity, self._Qv)
 
-        # ------------------------------------------------------------
-        # Stresses (metric AGMA 2101 fundamental equations)
-        # ------------------------------------------------------------
-        mt = pinion.transverse_module
-        common = self.Ft * self.Ko * self.Kv * self.Ks
-        self.bending_stress_pinion = (common / (b * mt)
-                                      * self.KH * self.KB / self.YJ_pinion)
-        if self.YJ_gear is not None:
-            self.bending_stress_gear = (common / (b * mt)
-                                        * self.KH * self.KB / self.YJ_gear)
-        else:
-            self.bending_stress_gear = None
-        self.contact_stress = self.ZE * math.sqrt(
-            common * self.KH / (pinion.pitch_diameter * b)
+    @property
+    def KH(self):
+        """float: Load-distribution factor (see
+        :func:`load_distribution_factor`)."""
+        return load_distribution_factor(
+            self.face_width, self.pinion.pitch_diameter,
+            condition=self._condition, crowned=self._crowned)
+
+    @property
+    def YJ_pinion(self):
+        """float: Pinion bending geometry factor (override if given)."""
+        if self._YJ_pinion is not None:
+            return self._YJ_pinion
+        mating = "rack" if self.is_rack else self.gear.teeth
+        return agma_data.geometry_factor_J(
+            self.pinion.teeth, mating, self.pinion.helix_angle)
+
+    @property
+    def YJ_gear(self):
+        """float or None: Gear bending geometry factor (None for a rack)."""
+        if self.is_rack:
+            return None
+        if self._YJ_gear is not None:
+            return self._YJ_gear
+        return agma_data.geometry_factor_J(
+            self.gear.teeth, self.pinion.teeth, self.gear.helix_angle)
+
+    @property
+    def ZI(self):
+        """float: Surface (pitting) geometry factor (see
+        :func:`geometry_factor_I`)."""
+        return geometry_factor_I(self.pinion,
+                                 gear=None if self.is_rack else self.gear)
+
+    @property
+    def ZE(self):
+        """float: Elastic coefficient in sqrt(MPa)."""
+        gear_props = (self.pinion.material_properties if self.is_rack
+                      else self.gear.material_properties)
+        return elastic_coefficient(self.pinion.material_properties, gear_props)
+
+    @property
+    def YN(self):
+        """float: Bending stress-cycle factor."""
+        return bending_life_factor(self._life_cycles)
+
+    @property
+    def ZN(self):
+        """float: Pitting stress-cycle factor."""
+        return contact_life_factor(self._life_cycles)
+
+    @property
+    def YZ(self):
+        """float: Reliability factor."""
+        return agma_data.reliability_factor(self._reliability)
+
+    @property
+    def _hardness(self):
+        """float or None: Pinion Brinell hardness (arg, else GearMaterial)."""
+        if self._hardness_HB is not None:
+            return self._hardness_HB
+        mat = self.pinion.material
+        return mat.hardness_HB if isinstance(mat, GearMaterial) else None
+
+    @property
+    def _grade_resolved(self):
+        """int: AGMA grade (the GearMaterial's when hardness comes from it)."""
+        if self._hardness_HB is None and isinstance(self.pinion.material,
+                                                    GearMaterial):
+            return self.pinion.material.grade
+        return self._grade
+
+    @property
+    def _gear_hardness(self):
+        """float or None: Gear Brinell hardness (arg, else GearMaterial)."""
+        if self._gear_hardness_HB is not None:
+            return self._gear_hardness_HB
+        if not self.is_rack and isinstance(self.gear.material, GearMaterial):
+            return self.gear.material.hardness_HB
+        return None
+
+    @property
+    def ZW(self):
+        """float: Hardness-ratio factor ZW (1.0 unless both hardnesses set)."""
+        ph, gh = self._hardness, self._gear_hardness
+        if ph is not None and gh is not None:
+            return hardness_ratio_factor(ph, gh, self.gear_ratio)
+        return 1.0
+
+    @property
+    def St(self):
+        """float: Allowable bending stress number in MPa (override if given)."""
+        if self._St is not None:
+            return self._St
+        return agma_data.allowable_bending_stress(self._hardness,
+                                                  self._grade_resolved)
+
+    @property
+    def Sc(self):
+        """float: Allowable contact stress number in MPa (override if given)."""
+        if self._Sc is not None:
+            return self._Sc
+        return agma_data.allowable_contact_stress(self._hardness,
+                                                  self._grade_resolved)
+
+    # ---- Stresses and safety factors ----
+
+    @property
+    def _common_load(self):
+        """float: Ft*Ko*Kv*Ks, shared by the bending and contact stresses."""
+        return self.Ft * self.Ko * self.Kv * self.Ks
+
+    @property
+    def bending_stress_pinion(self):
+        """float: Pinion bending stress sigma_F in MPa."""
+        return (self._common_load / (self.face_width
+                                     * self.pinion.transverse_module)
+                * self.KH * self.KB / self.YJ_pinion)
+
+    @property
+    def bending_stress_gear(self):
+        """float or None: Gear bending stress in MPa (None for a rack)."""
+        yj = self.YJ_gear
+        if yj is None:
+            return None
+        return (self._common_load / (self.face_width
+                                     * self.pinion.transverse_module)
+                * self.KH * self.KB / yj)
+
+    @property
+    def contact_stress(self):
+        """float: Contact (pitting) stress sigma_H in MPa (both members)."""
+        return self.ZE * math.sqrt(
+            self._common_load * self.KH
+            / (self.pinion.pitch_diameter * self.face_width)
             * self.ZR / self.ZI
         )
 
-        # Allowables and safety factors.
-        self.allowable_bending_stress = (
-            self.St * self.YN / (self.temperature_factor * self.YZ)
-        )
-        self.allowable_contact_stress = (
-            self.Sc * self.ZN * self.ZW / (self.temperature_factor * self.YZ)
-        )
-        self.SF_pinion = (self.allowable_bending_stress
-                          / self.bending_stress_pinion)
-        self.SF_gear = (self.allowable_bending_stress
-                        / self.bending_stress_gear
-                        if self.bending_stress_gear else None)
-        self.SH = self.allowable_contact_stress / self.contact_stress
+    @property
+    def allowable_bending_stress(self):
+        """float: Allowable bending stress sigma_FP in MPa."""
+        return self.St * self.YN / (self.temperature_factor * self.YZ)
+
+    @property
+    def allowable_contact_stress(self):
+        """float: Allowable contact stress sigma_HP in MPa."""
+        return (self.Sc * self.ZN * self.ZW
+                / (self.temperature_factor * self.YZ))
+
+    @property
+    def SF_pinion(self):
+        """float: Pinion bending safety factor."""
+        return self.allowable_bending_stress / self.bending_stress_pinion
+
+    @property
+    def SF_gear(self):
+        """float or None: Gear bending safety factor (None for a rack)."""
+        sg = self.bending_stress_gear
+        if sg is None:
+            return None
+        return self.allowable_bending_stress / sg
+
+    @property
+    def SH(self):
+        """float: Pitting safety factor (compare SH^2 with SF)."""
+        return self.allowable_contact_stress / self.contact_stress
 
     def summary(self):
         """

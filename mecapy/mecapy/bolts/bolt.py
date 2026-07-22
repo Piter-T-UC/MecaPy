@@ -9,6 +9,7 @@ classes in :mod:`mecapy.bolts.thread_data`.
 from math import pi
 
 from ..base import MechaElement
+from ..materials import CyclicLoadCases, Material
 from .thread_data import (
     SHIGLEY_MINOR_COEFF,
     SHIGLEY_PITCH_COEFF,
@@ -18,7 +19,7 @@ from .thread_data import (
 )
 
 
-class Bolt(MechaElement):
+class Bolt(CyclicLoadCases, MechaElement):
     """
     ISO metric bolt design and analysis.
 
@@ -84,36 +85,97 @@ class Bolt(MechaElement):
                 raise ValueError(
                     "Provide either a table size or diameter and pitch, not both"
                 )
-            self._thread = dict(get_thread(size))
-            if stress_area_method == "shigley":
-                geometry = shigley_thread_geometry(
-                    self._thread["nominal_diameter"], self._thread["pitch"]
-                )
-                self._thread["stress_area"] = geometry["stress_area"]
-            self.stress_area_method = stress_area_method or "table"
-            self.size = size
+            get_thread(size)  # validate the size (raises on unknown)
+            self._size = size
+            self._custom_diameter = None
+            self._custom_pitch = None
+            self._stress_area_method = stress_area_method or "table"
         elif diameter is not None and pitch is not None:
             if stress_area_method == "table":
                 raise ValueError(
                     "stress_area_method='table' requires a table size "
                     "(e.g. 'M10'), not a custom diameter and pitch"
                 )
-            self._thread = shigley_thread_geometry(diameter, pitch)
-            self.stress_area_method = "shigley"
-            self.size = f"M{diameter:g}x{pitch:g}"
+            shigley_thread_geometry(diameter, pitch)  # validate the geometry
+            self._size = None
+            self._custom_diameter = diameter
+            self._custom_pitch = pitch
+            self._stress_area_method = "shigley"
         elif diameter is not None or pitch is not None:
             raise ValueError("Custom bolts require both diameter and pitch")
         else:
             raise ValueError(
                 "Provide a thread size (e.g. 'M10') or diameter and pitch"
             )
-        self._strength = get_property_class(property_class)
         if length is None:
             raise ValueError("Bolt length must be provided")
         if length <= 0:
             raise ValueError("Bolt length must be strictly positive")
         self.length = length
-        self.property_class = property_class
+        self.property_class = property_class  # validating setter
+
+    # ---- Settable primary inputs (recompute the lookups, never cache) ----
+
+    @property
+    def size(self):
+        """str: Thread designation, e.g. "M10" (synthesized "M<d>x<p>" for a
+        custom bolt). Settable to another table size (D1)."""
+        if self._size is not None:
+            return self._size
+        return f"M{self._custom_diameter:g}x{self._custom_pitch:g}"
+
+    @size.setter
+    def size(self, value):
+        get_thread(value)  # validate the new size
+        self._size = value
+        self._custom_diameter = None
+        self._custom_pitch = None
+
+    @property
+    def stress_area_method(self):
+        """str: Source of :attr:`stress_area` — "table" or "shigley"."""
+        return self._stress_area_method
+
+    @stress_area_method.setter
+    def stress_area_method(self, value):
+        if value not in ("table", "shigley"):
+            raise ValueError("stress_area_method must be 'table' or 'shigley'")
+        if value == "table" and self._size is None:
+            raise ValueError(
+                "stress_area_method='table' requires a table size, "
+                "not a custom (diameter+pitch) bolt"
+            )
+        self._stress_area_method = value
+
+    @property
+    def property_class(self):
+        """str: ISO 898-1 property class, e.g. "8.8". Settable (D1)."""
+        return self._property_class
+
+    @property_class.setter
+    def property_class(self, value):
+        get_property_class(value)  # validate the class (raises on unknown)
+        self._property_class = value
+
+    @property
+    def _thread(self):
+        """dict: Thread geometry resolved fresh from the current size (or the
+        custom diameter/pitch), so mutating ``size`` updates every derived
+        dimension — never cached."""
+        if self._size is not None:
+            thread = dict(get_thread(self._size))
+            if self._stress_area_method == "shigley":
+                thread["stress_area"] = shigley_thread_geometry(
+                    thread["nominal_diameter"], thread["pitch"]
+                )["stress_area"]
+            return thread
+        return shigley_thread_geometry(self._custom_diameter, self._custom_pitch)
+
+    @property
+    def _strength(self):
+        """dict: Property-class strengths resolved fresh from
+        :attr:`property_class`, so mutating it updates the strengths."""
+        return get_property_class(self._property_class)
 
     # ---- Thread geometry ----
 
@@ -233,6 +295,20 @@ class Bolt(MechaElement):
             float: Tensile stress in MPa (force / stress area).
         """
         return force / self.stress_area
+
+    def _fatigue_material(self):
+        """Material: bolt material carrying the property-class strengths.
+
+        Overrides the :class:`~mecapy.materials.CyclicLoadCases` default so
+        the Miner S-N curve uses this bolt's ISO 898-1 tensile/yield
+        strengths (e.g. 800/640 MPa for class 8.8) rather than the generic
+        database steel. The Marin factors keep their defaults (machined,
+        kb = 1), so the endurance limit is an approximation — bolted-joint
+        fatigue proper (preload, joint constant) is a separate analysis.
+        """
+        return Material(base_material=self.material,
+                        ultimate_strength=self.tensile_strength,
+                        yield_strength=self.yield_strength)
 
     def bolt_safety_factor(self, force):
         """
