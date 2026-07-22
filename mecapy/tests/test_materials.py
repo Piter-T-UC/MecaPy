@@ -125,6 +125,24 @@ class TestMarinFactors:
         """Without a diameter, kb defaults to 1."""
         assert Material("steel").kb == 1.0
 
+    def test_kb_non_rotating_uses_equivalent_diameter(self):
+        """Non-rotating kb uses d_e = 0.370*diameter (Table 6-3)."""
+        m = Material("steel", diameter=100, rotating=False)
+        de = 0.370 * 100  # 37 mm, so the d_e <= 51 branch applies
+        assert m.effective_diameter == pytest.approx(de)
+        assert m.kb == pytest.approx((de / 7.62) ** -0.107)
+
+    def test_kb_non_rotating_larger_than_rotating(self):
+        """Non-rotating has a smaller d_e, hence a larger kb."""
+        rot = Material("steel", diameter=100)
+        non_rot = Material("steel", diameter=100, rotating=False)
+        assert non_rot.kb > rot.kb
+
+    def test_rotating_must_be_bool(self):
+        """A non-boolean rotating flag raises ValueError."""
+        with pytest.raises(ValueError):
+            Material("steel", diameter=50, rotating="yes")
+
     def test_eq_diameter_round_trip(self):
         """eq_diameter recovers d from a round section's 95% area."""
         m = Material("steel")
@@ -172,11 +190,270 @@ class TestMarinFactors:
         assert m.se_prime == pytest.approx(700.0)
 
     def test_endurance_limit_is_marin_product(self):
-        """Se equals ka*kb*kc*kd*ke*Se' (Marin equation)."""
+        """Se equals ka*kb*kc*ke*kf*Se' (Marin equation, no separate kd).
+
+        Temperature enters via Sut_T = kd*Sut inside ka and Se', so kd is
+        not a factor in the product.
+        """
         m = Material("steel", surface_finish="ground", diameter=25,
-                     temperature=150, reliability=0.99, loading="torsion")
-        expected = m.ka * m.kb * m.kc * m.kd * m.ke * m.se_prime
+                     temperature=150, reliability=0.99, loading="torsion",
+                     kf=0.85)
+        expected = m.ka * m.kb * m.kc * m.ke * m.kf * m.se_prime
         assert m.endurance_limit == pytest.approx(expected)
+
+    def test_ultimate_strength_temperature(self):
+        """Sut_T = kd*Sut and equals Sut at room temperature (kd = 1)."""
+        assert Material("steel").ultimate_strength_temperature == (
+            pytest.approx(400.0))
+        hot = Material("steel", temperature=500)  # kd = 0.768
+        assert hot.ultimate_strength_temperature == pytest.approx(
+            hot.kd * hot.ultimate_strength)
+
+    def test_temperature_propagates_without_double_counting(self):
+        """kd feeds ka and Se' via Sut_T, and is not applied a second time."""
+        hot = Material("steel", temperature=500)
+        a, b = 4.51, -0.265  # machined
+        sut_t = hot.kd * 400
+        assert hot.ka == pytest.approx(a * sut_t ** b)
+        assert hot.se_prime == pytest.approx(0.5 * sut_t)
+        # Se has no extra kd factor beyond what Sut_T already carries.
+        expected = (hot.ka * hot.kb * hot.kc * hot.ke * hot.kf
+                    * hot.se_prime)
+        assert hot.endurance_limit == pytest.approx(expected)
+
+    def test_kf_defaults_to_one(self):
+        """kf is 1.0 by default (no miscellaneous effect)."""
+        assert Material("steel").kf == pytest.approx(1.0)
+
+    def test_kf_scales_endurance_limit(self):
+        """Se scales linearly with kf, all else equal."""
+        base = Material("steel").endurance_limit
+        assert Material("steel", kf=0.7).endurance_limit == pytest.approx(
+            0.7 * base)
+
+    def test_nonpositive_kf_raises(self):
+        """A non-positive kf raises ValueError."""
+        with pytest.raises(ValueError):
+            Material("steel", kf=0)
+
+
+class TestNotchSensitivity:
+    """Test cases for the Neuber notch sensitivity factor q."""
+
+    def test_q_matches_neuber_formula(self):
+        """q_radius equals 1/(1 + sqrt(a)/sqrt(r)) for the current loading."""
+        m = Material("steel")  # bending, Sut = 400 MPa
+        expected = 1 / (1 + m.neuber_constant / math.sqrt(4))
+        assert m.q_radius(4) == pytest.approx(expected)
+
+    def test_q_known_value(self):
+        """q for default steel (Sut 400 MPa), bending, r = 4 mm is ~0.778."""
+        assert Material("steel").q_radius(4) == pytest.approx(0.778, abs=1e-3)
+
+    def test_q_grows_toward_one_with_radius(self):
+        """A larger notch radius gives a higher (more sensitive) q."""
+        m = Material("steel")
+        assert m.q_radius(8) > m.q_radius(2)
+
+    def test_q_in_unit_interval(self):
+        """q stays within [0, 1)."""
+        q = Material("steel").q_radius(3)
+        assert 0 <= q < 1
+
+    def test_torsion_differs_from_bending(self):
+        """Torsion uses the shear Neuber curve, giving a different q."""
+        m = Material("steel")
+        q_bending = m.q_radius(4, loading="bending")
+        q_torsion = m.q_radius(4, loading="torsion")
+        assert q_torsion != pytest.approx(q_bending)
+
+    def test_axial_matches_bending_curve(self):
+        """Axial shares the bending Neuber curve."""
+        m = Material("steel")
+        assert m.q_radius(4, loading="axial") == pytest.approx(
+            m.q_radius(4, loading="bending"))
+
+    def test_explicit_loading_arg_wins(self):
+        """An explicit loading arg overrides the instance's loading."""
+        m = Material("steel", loading="torsion")
+        assert m.q_radius(4, loading="bending") == pytest.approx(
+            Material("steel", loading="bending").q_radius(4))
+
+    def test_nonpositive_radius_raises(self):
+        """A non-positive notch radius raises ValueError."""
+        with pytest.raises(ValueError):
+            Material("steel").q_radius(0)
+
+    def test_combined_returns_bending_and_shear_pair(self):
+        """Combined loading returns (q, q_shear) for the two curves."""
+        m = Material("steel")
+        q_pair = m.q_radius(4, loading="combined")
+        assert q_pair == (Material("steel").q_radius(4, loading="bending"),
+                          Material("steel").q_radius(4, loading="torsion"))
+
+    def test_combined_from_instance_loading(self):
+        """A material with combined loading returns the pair by default."""
+        m = Material("steel", loading="combined")
+        ref = Material("steel")
+        assert m.q_radius(4) == (ref.q_radius(4, loading="bending"),
+                                 ref.q_radius(4, loading="torsion"))
+
+    def test_q_recomputes_after_strength_change(self):
+        """Changing Sut changes the Neuber constant and hence q."""
+        m = Material("steel")
+        q_before = m.q_radius(4)
+        m.ultimate_strength = 1200
+        assert m.q_radius(4) != pytest.approx(q_before)
+
+
+class TestNotchSensitivityRecords:
+    """q_radius records each (radius, q) on the material's q/q_shear lists."""
+
+    def test_bending_recorded_on_q(self):
+        """A bending call appends a {radius, q} entry to q, not q_shear."""
+        m = Material("steel")
+        value = m.q_radius(4)
+        assert m.q == [{"radius": 4, "q": value}]
+        assert m.q_shear == []
+
+    def test_torsion_recorded_on_q_shear(self):
+        """A torsion call records on q_shear, leaving q empty."""
+        m = Material("steel")
+        value = m.q_radius(4, loading="torsion")
+        assert m.q_shear == [{"radius": 4, "q": value}]
+        assert m.q == []
+
+    def test_multiple_radii_accumulate(self):
+        """Different radii accumulate as separate entries."""
+        m = Material("steel")
+        m.q_radius(2)
+        m.q_radius(6)
+        assert [e["radius"] for e in m.q] == [2, 6]
+
+    def test_same_radius_updates_in_place(self):
+        """Re-querying a radius updates its entry rather than duplicating."""
+        m = Material("steel")
+        m.q_radius(4)
+        m.q_radius(4)
+        assert len(m.q) == 1
+
+    def test_combined_records_both_lists(self):
+        """Combined loading records on both q and q_shear."""
+        m = Material("steel")
+        q_b, q_t = m.q_radius(4, loading="combined")
+        assert m.q == [{"radius": 4, "q": q_b}]
+        assert m.q_shear == [{"radius": 4, "q": q_t}]
+
+    def test_q_returns_a_copy(self):
+        """Mutating the returned q list does not affect the material."""
+        m = Material("steel")
+        m.q_radius(4)
+        m.q.clear()
+        assert len(m.q) == 1
+
+    def test_q_settable_to_list(self):
+        """q can be replaced with a validated record list, or cleared."""
+        m = Material("steel")
+        m.q = [{"radius": 3, "q": 0.8}]
+        assert m.q == [{"radius": 3, "q": 0.8}]
+        m.q = None
+        assert m.q == []
+
+    def test_q_setter_validates_entries(self):
+        """A record with an out-of-range q or bad radius raises."""
+        m = Material("steel")
+        with pytest.raises(ValueError):
+            m.q = [{"radius": 3, "q": 1.5}]
+        with pytest.raises(ValueError):
+            m.q = [{"radius": 0, "q": 0.5}]
+
+
+class TestFatigueStressConcentration:
+    """Test cases for Material.fatigue_stress_concentration_factor."""
+
+    def test_kf_formula(self):
+        """Kf equals 1 + q*(Kt - 1)."""
+        assert Material.fatigue_stress_concentration_factor(
+            2.5, 0.8) == pytest.approx(1 + 0.8 * (2.5 - 1))
+
+    def test_default_q_is_one(self):
+        """With the default q = 1, Kf equals Kt (fully notch-sensitive)."""
+        assert Material.fatigue_stress_concentration_factor(
+            2.5) == pytest.approx(2.5)
+
+    def test_zero_q_gives_unity(self):
+        """q = 0 removes the notch effect, Kf = 1."""
+        assert Material.fatigue_stress_concentration_factor(
+            3.0, 0) == pytest.approx(1)
+
+    def test_callable_on_instance(self):
+        """The method is reachable from an instance too."""
+        m = Material("steel")
+        q = m.q_radius(4)
+        assert m.fatigue_stress_concentration_factor(2.0, q) == pytest.approx(
+            1 + q)
+
+    def test_kt_below_one_raises(self):
+        """A Kt below 1 raises ValueError."""
+        with pytest.raises(ValueError):
+            Material.fatigue_stress_concentration_factor(0.9)
+
+    def test_q_out_of_range_raises(self):
+        """A q outside [0, 1] raises ValueError."""
+        with pytest.raises(ValueError):
+            Material.fatigue_stress_concentration_factor(2.0, 1.5)
+
+
+class TestFatigueKfFromRecordedQ:
+    """fatigue_stress_concentration_factors uses the material's stored q."""
+
+    def test_returns_kf_per_recorded_q(self):
+        """One Kf per recorded q, each equal to 1 + q*(Kt - 1)."""
+        m = Material("steel")
+        q2 = m.q_radius(2)
+        q6 = m.q_radius(6)
+        kfs = m.fatigue_stress_concentration_factors(2.5)
+        assert kfs == pytest.approx([1 + q2 * 1.5, 1 + q6 * 1.5])
+
+    def test_results_kept_inside_material(self):
+        """Computed Kf values are stored on kf_notch, keyed by radius."""
+        m = Material("steel")
+        m.q_radius(4)
+        m.fatigue_stress_concentration_factors(2.0)
+        assert len(m.kf_notch) == 1
+        rec = m.kf_notch[0]
+        assert rec["radius"] == 4 and rec["loading"] == "bending"
+        assert rec["kf"] == pytest.approx(1 + rec["q"])
+
+    def test_combined_uses_both_lists(self):
+        """Combined loading produces a Kf for both q and q_shear entries."""
+        m = Material("steel")
+        m.q_radius(4, loading="combined")
+        kfs = m.fatigue_stress_concentration_factors(2.0, loading="combined")
+        assert len(kfs) == 2
+        assert {r["loading"] for r in m.kf_notch} == {"bending", "torsion"}
+
+    def test_kf_notch_returns_copy(self):
+        """Mutating the returned kf_notch list does not affect the material."""
+        m = Material("steel")
+        m.q_radius(4)
+        m.fatigue_stress_concentration_factors(2.0)
+        m.kf_notch.clear()
+        assert len(m.kf_notch) == 1
+
+    def test_recompute_updates_existing_record(self):
+        """Re-running with a new Kt updates the record in place."""
+        m = Material("steel")
+        m.q_radius(4)
+        m.fatigue_stress_concentration_factors(2.0)
+        m.fatigue_stress_concentration_factors(3.0)
+        assert len(m.kf_notch) == 1
+        assert m.kf_notch[0]["kt"] == 3.0
+
+    def test_no_recorded_q_raises(self):
+        """Asking for Kf before any q is recorded raises ValueError."""
+        with pytest.raises(ValueError):
+            Material("steel").fatigue_stress_concentration_factors(2.0)
 
 
 class TestRecompute:
@@ -198,6 +475,13 @@ class TestRecompute:
         assert m.kb == pytest.approx(1.51 * 100 ** -0.157)
         assert m.kb != pytest.approx(kb_small)
 
+    def test_changing_kf_updates_se(self):
+        """Changing kf after construction rescales the endurance limit."""
+        m = Material("steel")
+        se = m.endurance_limit
+        m.kf = 0.5
+        assert m.endurance_limit == pytest.approx(0.5 * se)
+
     def test_setters_revalidate(self):
         """Setting an invalid value after construction still raises."""
         m = Material("steel")
@@ -207,6 +491,8 @@ class TestRecompute:
             m.surface_finish = "polished"
         with pytest.raises(ValueError):
             m.diameter = 500
+        with pytest.raises(ValueError):
+            m.kf = -1
 
 
 class TestSNCurve:
@@ -234,6 +520,34 @@ class TestSNCurve:
         """A stress below Se gives infinite life."""
         m = Material("steel")
         assert m.cycles_to_failure(m.endurance_limit * 0.9) == math.inf
+
+    def test_fatigue_strength_at_1000_is_f_sut(self):
+        """Sf at 10^3 cycles equals f*Sut_T (the S-N line start)."""
+        m = Material("steel")
+        expected = m.f * m.ultimate_strength_temperature
+        assert m.fatigue_strength(1e3) == pytest.approx(expected)
+
+    def test_fatigue_strength_at_knee_is_se(self):
+        """Sf at the 10^6-cycle knee equals the endurance limit Se."""
+        m = Material("steel")
+        assert m.fatigue_strength(1e6) == pytest.approx(m.endurance_limit)
+
+    def test_fatigue_strength_flat_beyond_knee(self):
+        """Sf stays at Se for lives past 10^6 cycles."""
+        m = Material("steel")
+        assert m.fatigue_strength(1e9) == pytest.approx(m.endurance_limit)
+
+    def test_fatigue_strength_inverts_cycles_to_failure(self):
+        """Sf(cycles_to_failure(sigma)) recovers the reversed stress."""
+        m = Material("steel")
+        sigma = 300.0
+        n = m.cycles_to_failure(sigma)
+        assert m.fatigue_strength(n) == pytest.approx(sigma)
+
+    def test_fatigue_strength_low_cycle_raises(self):
+        """A life below 10^3 cycles is outside the high-cycle range."""
+        with pytest.raises(ValueError):
+            Material("steel").fatigue_strength(500)
 
     def test_mean_stress_shortens_life(self):
         """A tensile mean stress reduces the cycles to failure."""

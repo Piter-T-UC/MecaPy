@@ -58,7 +58,7 @@ SURFACE_FINISH_FACTORS = {
 }
 
 # Marin load factor kc (Shigley Eq. 6-26).
-LOAD_FACTORS = {"bending": 1.0, "axial": 0.85, "torsion": 0.59}
+LOAD_FACTORS = {"bending": 1.0, "axial": 0.85, "torsion": 0.59, "combined": 1}
 
 # Marin temperature factor kd = ST/SRT vs temperature in deg C
 # (Shigley Table 6-4); linearly interpolated between table points.
@@ -81,6 +81,12 @@ _FATIGUE_CRITERIA = ("goodman", "soderberg", "gerber", "asme_elliptic")
 # Sut below which the fatigue-strength fraction f is taken as 0.9
 # (70 kpsi, Shigley Fig. 6-18).
 _F_FRACTION_SUT_MIN = 482.6  # MPa
+
+# High-cycle fatigue life bounds for the S-N (Woehler) line (Shigley
+# Eq. 6-13): Sf = a*N^b holds from 10^3 cycles to the 10^6-cycle endurance
+# knee; below 10^3 is low-cycle fatigue, above 10^6 the strength is flat Se.
+_SN_LOW_CYCLE = 1e3
+_SN_KNEE_CYCLES = 1e6
 _MPA_PER_KPSI = constants.PSI_TO_MPA * 1e3
 
 # Validity range of the rotating-size factor kb (Shigley Eq. 6-20), mm.
@@ -91,6 +97,20 @@ _KB_DIAMETER_MAX = 254.0
 # a rotating round section has A_0.95sigma = 0.0766 * d^2.
 _A95_COEFF = 0.0766
 
+# Equivalent-diameter factor for a NON-rotating solid round section
+# (Table 6-3: A_0.95sigma = 0.01046 d^2 -> d_e = sqrt(0.01046/0.0766) d).
+_NONROTATING_ROUND_FACTOR = 0.370
+
+# Neuber constant sqrt(a) curve-fit for steels (Shigley Eqs. 6-35a/6-35b):
+# sqrt(a) [in^0.5] = c0 + c1*Sut + c2*Sut^2 + c3*Sut^3 with Sut in kpsi.
+# Bending and axial share one fit; torsion (shear) uses the other. Axial
+# uses the bending/axial curve. Combined loading has no single notch curve.
+_NEUBER_COEFFS = {
+    "bending": (0.246, -3.08e-3, 1.51e-5, -2.67e-8),
+    "axial": (0.246, -3.08e-3, 1.51e-5, -2.67e-8),
+    "torsion": (0.190, -2.51e-3, 1.35e-5, -2.67e-8),
+}
+
 _LOAD_CASE_KEYS = ("stress_amplitude", "mean_stress", "cycles", "label")
 
 
@@ -100,36 +120,57 @@ class Material:
 
     Strengths default from the material database (converted Pa -> MPa) and
     can be overridden explicitly. The endurance limit follows the Marin
-    equation Se = ka*kb*kc*kd*ke*Se' with Se' estimated from Sut (steel
-    correlation). Cyclic load cases are evaluated with the Goodman
+    equation Se = ka*kb*kc*ke*kf*Se' with Se' estimated from the
+    temperature-corrected ultimate strength Sut_T = kd*Sut (steel
+    correlation); temperature enters through Sut_T (which also drives ka,
+    f, sn_a, sn_b), not as a separate kd factor on Se. Cyclic load cases
+    are evaluated with the Goodman
     criterion, accumulated with Miner's rule, and plotted on S-N (Woehler)
     and Goodman diagrams.
 
     Every Marin input (surface finish, loading, diameter, temperature,
-    reliability) and both strengths are settable; all derived quantities
+    reliability, kf) and both strengths are settable; all derived quantities
     (ka..ke, Se, S-N coefficients, damage) recompute automatically.
 
     Attributes:
         base_material (str): Database material this instance is based on
             (fixed at construction; supplies density, moduli, etc.).
-        ultimate_strength (float): Ultimate tensile strength Sut in MPa.
+        ultimate_strength (float): Ultimate tensile strength Sut in MPa
+            (room temperature).
+        ultimate_strength_temperature (float): Temperature-corrected
+            ultimate strength Sut_T = kd*Sut in MPa (derived, read-only).
+            Feeds ka, se_prime, f, sn_a and sn_b.
         yield_strength (float): Yield strength Sy in MPa.
         surface_finish (str): Surface condition for ka (key of
             ``SURFACE_FINISH_FACTORS``).
         loading (str): Load type for kb/kc ("bending", "axial", "torsion").
-        diameter (float or None): Rotating-section diameter in mm for kb
+        diameter (float or None): Section diameter in mm for kb
             (None -> kb = 1).
+        rotating (bool): Whether the round section rotates; if False kb
+            uses the equivalent diameter 0.370*diameter (Table 6-3).
         temperature (float): Operating temperature in deg C for kd.
         reliability (float): Survival probability for ke, in [0.5, 1).
             Tabulated values (``RELIABILITY_FACTORS``) use Table 6-5;
             any other value is computed from Shigley Eq. 6-30.
+        kf (float): Marin miscellaneous-effects factor (default: 1.0).
+            Lumps stress concentration, corrosion, plating, residual
+            stress and other effects not covered by ka..ke. Must be
+            strictly positive.
+        q (list): Recorded notch-sensitivity entries for bending/axial
+            loading, each a ``{"radius": mm, "q": value}`` dict. Populated
+            by ``q_radius`` (which also returns the value it records).
+        q_shear (list): Recorded notch-sensitivity entries for torsion
+            loading, same ``{"radius", "q"}`` shape as ``q``.
+        kf_notch (list): Recorded fatigue stress-concentration results, each
+            a ``{"radius", "loading", "q", "kt", "kf"}`` dict. Populated by
+            ``fatigue_stress_concentration_factors`` from the recorded q.
         name (str): Optional identifier.
     """
 
     def __init__(self, base_material="steel", ultimate_strength=None,
                  yield_strength=None, surface_finish="machined",
-                 loading="bending", diameter=None, temperature=20.0,
-                 reliability=0.5, name=None):
+                 loading="bending", diameter=None, rotating=True,
+                 temperature=20.0, reliability=0.5, kf=1.0, name=None):
         """
         Initialize a Material.
 
@@ -145,14 +186,19 @@ class Material:
                 "machined"). One of ``SURFACE_FINISH_FACTORS``.
             loading (str): Load type for kc (default: "bending"). One of
                 ``LOAD_FACTORS``.
-            diameter (float): Optional rotating-section diameter in mm for
-                the size factor kb. Must be within [2.79, 254] mm
-                (Shigley Eq. 6-20 validity range). None gives kb = 1.
+            diameter (float): Optional section diameter in mm for the size
+                factor kb. Must be within [2.79, 254] mm (Shigley Eq. 6-20
+                validity range). None gives kb = 1.
+            rotating (bool): Whether the round section rotates (default:
+                True). If False, kb uses the non-rotating equivalent
+                diameter d_e = 0.370*diameter (Table 6-3).
             temperature (float): Operating temperature in deg C (default:
                 20). Must be within [20, 600] (Table 6-4 range).
             reliability (float): Survival probability (default: 0.5, i.e.
                 ke = 1). Must be in [0.5, 1); tabulated values use Table
                 6-5, any other value is computed from Shigley Eq. 6-30.
+            kf (float): Marin miscellaneous-effects factor (default: 1.0,
+                i.e. no effect). Must be strictly positive.
             name (str): Optional identifier.
 
         Raises:
@@ -185,8 +231,13 @@ class Material:
         self.surface_finish = surface_finish
         self.loading = loading
         self.diameter = diameter
+        self.rotating = rotating
         self.temperature = temperature
         self.reliability = reliability
+        self.kf = kf
+        self._q = []
+        self._q_shear = []
+        self._kf_notch = []
         self._load_cases = []
 
     # ---- Settable primary inputs ----
@@ -261,6 +312,31 @@ class Material:
             )
         self._diameter = value
 
+    @property
+    def rotating(self):
+        """bool: Whether the round section rotates (affects kb)."""
+        return self._rotating
+
+    @rotating.setter
+    def rotating(self, value):
+        if not isinstance(value, bool):
+            raise ValueError("rotating must be a bool")
+        self._rotating = value
+
+    @property
+    def effective_diameter(self):
+        """float or None: Diameter kb uses, in mm.
+
+        The physical ``diameter`` when rotating, else the non-rotating
+        equivalent d_e = 0.370*diameter (Table 6-3). None when no diameter
+        is set.
+        """
+        if self.diameter is None:
+            return None
+        if self.rotating:
+            return self.diameter
+        return _NONROTATING_ROUND_FACTOR * self.diameter
+
     def eq_diameter(self, A95):
         """
         Set the size-factor diameter from a 95%-stress area (Eq. 6-25).
@@ -317,26 +393,35 @@ class Material:
             )
         self._reliability = value
 
+    
     # ---- Marin factors and endurance limit (recomputed on access) ----
 
     @property
     def ka(self):
-        """float: Marin surface-condition factor, a*Sut^b (Table 6-2)."""
+        """float: Marin surface-condition factor, a*Sut_T^b (Table 6-2).
+
+        Evaluated at the temperature-corrected ultimate strength
+        ``ultimate_strength_temperature`` (Sut_T = kd*Sut), so temperature
+        enters the endurance limit here instead of as a separate kd factor.
+        """
         a, b = SURFACE_FINISH_FACTORS[self.surface_finish]
-        return a * self.ultimate_strength ** b
+        return a * self.ultimate_strength_temperature ** b
 
     @property
     def kb(self):
         """float: Marin size factor (Eq. 6-19/6-20).
 
         1.0 for axial loading or when no diameter is set; otherwise
-        (d/7.62)^-0.107 for d <= 51 mm and 1.51*d^-0.157 above.
+        (de/7.62)^-0.107 for de <= 51 mm and 1.51*de^-0.157 above, where
+        de is ``effective_diameter`` (the physical diameter when rotating,
+        else the non-rotating equivalent 0.370*diameter).
         """
-        if self.loading == "axial" or self.diameter is None:
+        de = self.effective_diameter
+        if self.loading == "axial" or de is None:
             return 1.0
-        if self.diameter <= 51:
-            return (self.diameter / 7.62) ** -0.107
-        return 1.51 * self.diameter ** -0.157
+        if de <= 51:
+            return (de / 7.62) ** -0.107
+        return 1.51 * de ** -0.157
 
     @property
     def kc(self):
@@ -355,6 +440,18 @@ class Material:
         return TEMPERATURE_FACTORS[points[-1]]
 
     @property
+    def ultimate_strength_temperature(self):
+        """float: Temperature-corrected ultimate strength Sut_T in MPa.
+
+        Sut_T = kd*Sut (Shigley Sec. 6-9, kd = ST/SRT). All fatigue-strength
+        quantities derived from Sut — ``ka``, ``se_prime``, ``f``, ``sn_a``
+        and ``sn_b`` — use this value so temperature is applied once, at the
+        strength, rather than as a separate kd multiplier on Se. Equals Sut
+        at room temperature (kd = 1).
+        """
+        return self.kd * self.ultimate_strength
+
+    @property
     def ke(self):
         """float: Marin reliability factor (Shigley Table 6-5 / Eq. 6-30).
 
@@ -365,52 +462,342 @@ class Material:
         if self.reliability in RELIABILITY_FACTORS:
             return RELIABILITY_FACTORS[self.reliability]
         return 1 - 0.08 * NormalDist().inv_cdf(self.reliability)
+    @property
+    def kf(self):
+        """float: Marin miscellaneous-effects factor."""
+        return self._kf
+
+    @kf.setter
+    def kf(self, value):
+        if value <= 0:
+            raise ValueError("kf must be strictly positive")
+        self._kf = value
+
+    @staticmethod
+    def _validate_q_records(value):
+        """list: Sanitized copy of a ``{radius, q}`` record list (or None)."""
+        if value is None:
+            return []
+        records = []
+        for entry in value:
+            radius, q_value = entry["radius"], entry["q"]
+            if radius <= 0:
+                raise ValueError("radius in a q record must be positive")
+            if not 0 <= q_value <= 1:
+                raise ValueError("q in a q record must be within [0, 1]")
+            records.append({"radius": radius, "q": q_value})
+        return records
+
+    @property
+    def q(self):
+        """list: Recorded ``{radius, q}`` entries for bending/axial loading.
+
+        Each ``q_radius`` call with bending/axial (or combined) loading
+        appends or updates the entry for its radius here. Returns a copy;
+        assign a list to replace, or ``None``/``[]`` to clear.
+        """
+        return [dict(entry) for entry in self._q]
+
+    @q.setter
+    def q(self, value):
+        self._q = self._validate_q_records(value)
+
+    @property
+    def q_shear(self):
+        """list: Recorded ``{radius, q}`` entries for torsion loading.
+
+        Populated by ``q_radius`` under torsion (or combined) loading, same
+        shape and semantics as ``q``.
+        """
+        return [dict(entry) for entry in self._q_shear]
+
+    @q_shear.setter
+    def q_shear(self, value):
+        self._q_shear = self._validate_q_records(value)
 
     @property
     def se_prime(self):
         """float: Unmodified endurance limit Se' in MPa.
 
-        Steel correlation (Eq. 6-8): 0.5*Sut for Sut <= 1400 MPa, else
-        700 MPa. For non-ferrous materials this is an approximation only —
-        many (e.g. aluminum) have no true endurance limit.
+        Steel correlation (Eq. 6-8): 0.5*Sut_T for Sut_T <= 1400 MPa, else
+        700 MPa, evaluated at the temperature-corrected ultimate strength
+        ``ultimate_strength_temperature``. For non-ferrous materials this is
+        an approximation only — many (e.g. aluminum) have no true endurance
+        limit.
         """
-        if self.ultimate_strength <= 1400:
-            return 0.5 * self.ultimate_strength
+        sut_t = self.ultimate_strength_temperature
+        if sut_t <= 1400:
+            return 0.5 * sut_t
         return 700.0
 
     @property
     def endurance_limit(self):
         """float: Corrected endurance limit Se in MPa.
 
-        Marin equation (Eq. 6-17): Se = ka*kb*kc*kd*ke*Se'. The
-        miscellaneous-effects factor kf is taken as 1.
+        Marin equation (Eq. 6-17): Se = ka*kb*kc*ke*kf*Se', where kf is the
+        miscellaneous-effects factor (default 1.0). The temperature factor
+        kd is NOT a separate multiplier here — temperature is applied at the
+        strength via ``ultimate_strength_temperature`` (Sut_T = kd*Sut),
+        which drives ka and Se'. Applying kd again would double-count it.
         """
-        return self.ka * self.kb * self.kc * self.kd * self.ke * self.se_prime
+        return (self.ka * self.kb * self.kc * self.ke * self.kf
+                * self.se_prime)
+
+    # ---- Notch sensitivity (Neuber) ----
+
+    def _neuber_sqrt_a(self, loading):
+        """float: Neuber constant sqrt(a) in sqrt(mm) for a loading type.
+
+        Steel curve fit (Shigley Eqs. 6-35a/6-35b) evaluated in US units
+        (sqrt(in), Sut in kpsi), then converted to sqrt(mm) at the
+        boundary. Raises ValueError for a loading without a notch curve
+        (e.g. "combined").
+        """
+        if loading not in _NEUBER_COEFFS:
+            available = ", ".join(sorted(_NEUBER_COEFFS))
+            raise ValueError(
+                f"Notch sensitivity is defined for {available} loading, "
+                f"not {loading!r}"
+            )
+        c0, c1, c2, c3 = _NEUBER_COEFFS[loading]
+        sut = self.ultimate_strength / _MPA_PER_KPSI  # kpsi
+        sqrt_a_in = c0 + c1 * sut + c2 * sut ** 2 + c3 * sut ** 3
+        return sqrt_a_in * math.sqrt(constants.IN_TO_MM)
+
+    @property
+    def neuber_constant(self):
+        """float: Neuber constant sqrt(a) in sqrt(mm) for ``self.loading``.
+
+        Steel correlation (Shigley Eq. 6-35), bending/axial vs. torsion
+        selected from ``self.loading``. Raises ValueError if the current
+        loading has no notch curve (e.g. "combined").
+        """
+        return self._neuber_sqrt_a(self.loading)
+
+    def _record_q(self, records, radius, value):
+        """Append or update the ``{radius, q}`` entry for a radius in place."""
+        for entry in records:
+            if entry["radius"] == radius:
+                entry["q"] = value
+                return
+        records.append({"radius": radius, "q": value})
+
+    def _q_for(self, loading, radius):
+        """float: Neuber notch sensitivity for a loading, recorded on self.
+
+        Computes q = 1 / (1 + sqrt(a)/sqrt(r)) and stores the ``{radius, q}``
+        entry in ``q`` (bending/axial) or ``q_shear`` (torsion).
+        """
+        if radius <= 0:
+            raise ValueError("Notch radius must be strictly positive")
+        sqrt_a = self._neuber_sqrt_a(loading)
+        value = 1.0 / (1.0 + sqrt_a / math.sqrt(radius))
+        records = self._q_shear if loading == "torsion" else self._q
+        self._record_q(records, radius, value)
+        return value
+
+    def q_radius(self, radius, loading=None):
+        """
+        Notch sensitivity q for a notch radius (Neuber, Shigley Eq. 6-34).
+
+        Computes q = 1 / (1 + sqrt(a)/sqrt(r)), with sqrt(a) the Neuber
+        constant (steel curve fit, Eq. 6-35) and r the notch root radius,
+        then records the ``{radius, q}`` entry on the material: in ``q`` for
+        bending/axial loading, ``q_shear`` for torsion. For
+        ``loading="combined"`` both are computed and recorded, and the pair
+        is returned. q feeds ``fatigue_stress_concentration_factor``
+        (Kf = 1 + q*(Kt - 1)).
+
+        Args:
+            radius (float): Notch root radius r in mm. Must be strictly
+                positive.
+            loading (str): Load type selecting the Neuber curve and the
+                record list (default: ``self.loading``). One of "bending",
+                "axial", "torsion", "combined"; bending and axial share the
+                same curve.
+
+        Returns:
+            float: Notch sensitivity q in [0, 1] for a single loading, or a
+            ``(q, q_shear)`` tuple of two such values for "combined".
+
+        Raises:
+            ValueError: If ``radius`` is not strictly positive, or
+                ``loading`` has no notch curve (e.g. "combined" is handled,
+                but an unknown loading raises).
+        """
+        loading = self.loading if loading is None else loading
+        if loading == "combined":
+            return (self._q_for("bending", radius),
+                    self._q_for("torsion", radius))
+        return self._q_for(loading, radius)
+
+    @staticmethod
+    def fatigue_stress_concentration_factor(kt, q=1.0):
+        """
+        Fatigue stress-concentration factor Kf from Kt and sensitivity q.
+
+        Kf = 1 + q*(Kt - 1) (Shigley Eq. 6-32). q = 1.0 (the default) is the
+        fully notch-sensitive, conservative case Kf = Kt; q = 0 gives Kf = 1
+        (no notch effect). Get a q value from ``q_radius`` (the ``q`` it
+        returns, or an entry of the ``q``/``q_shear`` record lists).
+
+        Args:
+            kt (float): Theoretical (geometric) stress-concentration factor
+                Kt. Must be >= 1.
+            q (float): Notch sensitivity (default: 1.0). Within [0, 1].
+
+        Returns:
+            float: Fatigue stress-concentration factor Kf (>= 1).
+
+        Raises:
+            ValueError: If ``kt`` < 1 or ``q`` is outside [0, 1].
+        """
+        if kt < 1:
+            raise ValueError("Kt (stress-concentration factor) must be >= 1")
+        if not 0 <= q <= 1:
+            raise ValueError("q (notch sensitivity) must be within [0, 1]")
+        return 1.0 + q * (kt - 1.0)
+
+    @property
+    def kf_notch(self):
+        """list: Recorded fatigue stress-concentration results.
+
+        One ``{"radius", "loading", "q", "kt", "kf"}`` dict per
+        (radius, loading) evaluated by
+        ``fatigue_stress_concentration_factors``. Returns a copy.
+        """
+        return [dict(entry) for entry in self._kf_notch]
+
+    def _record_kf(self, radius, loading, q, kt, kf):
+        """Append or update the Kf record for a (radius, loading) in place."""
+        for entry in self._kf_notch:
+            if entry["radius"] == radius and entry["loading"] == loading:
+                entry.update(q=q, kt=kt, kf=kf)
+                return
+        self._kf_notch.append({"radius": radius, "loading": loading,
+                               "q": q, "kt": kt, "kf": kf})
+
+    def _q_records_for(self, loading):
+        """list: ``(loading, records)`` pairs of stored q lists for a loading.
+
+        bending/axial -> ``q``; torsion -> ``q_shear``; combined -> both.
+        """
+        if loading == "torsion":
+            return [("torsion", self._q_shear)]
+        if loading in ("bending", "axial"):
+            return [(loading, self._q)]
+        if loading == "combined":
+            return [("bending", self._q), ("torsion", self._q_shear)]
+        available = "bending, axial, torsion, combined"
+        raise ValueError(
+            f"Unknown loading {loading!r}. Available: {available}"
+        )
+
+    def fatigue_stress_concentration_factors(self, kt, loading=None):
+        """
+        Fatigue stress-concentration factor Kf for every recorded q value.
+
+        Applies Kf = 1 + q*(Kt - 1) (Shigley Eq. 6-32) to each notch
+        sensitivity already recorded by ``q_radius`` (``q`` for
+        bending/axial, ``q_shear`` for torsion), stores each result on the
+        material's ``kf_notch`` list, and returns the Kf values. Combined
+        loading uses both record lists (bending/axial entries first).
+
+        Args:
+            kt (float): Theoretical stress-concentration factor Kt applied
+                to every recorded q. Must be >= 1.
+            loading (str): Which recorded q list to use (default:
+                ``self.loading``). One of "bending", "axial", "torsion",
+                "combined".
+
+        Returns:
+            list: Kf values (floats), one per recorded q entry used, in
+            record order.
+
+        Raises:
+            ValueError: If ``kt`` < 1, ``loading`` is unknown, or no q
+                values have been recorded for the requested loading (call
+                ``q_radius`` first).
+        """
+        loading = self.loading if loading is None else loading
+        sources = self._q_records_for(loading)
+        results = []
+        for load_name, records in sources:
+            for entry in records:
+                kf = self.fatigue_stress_concentration_factor(kt, entry["q"])
+                self._record_kf(entry["radius"], load_name, entry["q"], kt, kf)
+                results.append(kf)
+        if not results:
+            raise ValueError(
+                f"No q values recorded for {loading!r} loading; "
+                "call q_radius(...) first"
+            )
+        return results
 
     # ---- S-N (Woehler) curve ----
 
     @property
     def f(self):
-        """float: Fatigue-strength fraction of Sut at 10^3 cycles.
+        """float: Fatigue-strength fraction of Sut_T at 10^3 cycles.
 
         Fig. 6-18 fit: 0.9 below 482.6 MPa (70 kpsi), else the quadratic
-        1.06 - 2.8e-3*Sut + 6.9e-6*Sut^2 with Sut in kpsi.
+        1.06 - 2.8e-3*Sut_T + 6.9e-6*Sut_T^2 with Sut_T in kpsi. Uses the
+        temperature-corrected ``ultimate_strength_temperature``.
         """
-        if self.ultimate_strength < _F_FRACTION_SUT_MIN:
+        sut_t = self.ultimate_strength_temperature
+        if sut_t < _F_FRACTION_SUT_MIN:
             return 0.9
-        sut_kpsi = self.ultimate_strength / _MPA_PER_KPSI
+        sut_kpsi = sut_t / _MPA_PER_KPSI
         return 1.06 - 2.8e-3 * sut_kpsi + 6.9e-6 * sut_kpsi ** 2
 
     @property
     def sn_a(self):
-        """float: S-N curve coefficient a in MPa, (f*Sut)^2/Se (Eq. 6-14)."""
-        return (self.f * self.ultimate_strength) ** 2 / self.endurance_limit
+        """float: S-N curve coefficient a in MPa, (f*Sut_T)^2/Se (Eq. 6-14).
+
+        Uses the temperature-corrected ``ultimate_strength_temperature``.
+        """
+        return ((self.f * self.ultimate_strength_temperature) ** 2
+                / self.endurance_limit)
 
     @property
     def sn_b(self):
-        """float: S-N curve exponent b, -(1/3)*log10(f*Sut/Se) (Eq. 6-15)."""
-        return -math.log10(self.f * self.ultimate_strength
+        """float: S-N curve exponent b, -(1/3)*log10(f*Sut_T/Se) (Eq. 6-15).
+
+        Uses the temperature-corrected ``ultimate_strength_temperature``.
+        """
+        return -math.log10(self.f * self.ultimate_strength_temperature
                            / self.endurance_limit) / 3
+
+    def fatigue_strength(self, cycles):
+        """
+        Fatigue strength Sf at a given life N from the S-N curve (Eq. 6-13).
+
+        Completely-reversed high-cycle fatigue: Sf = a*N^b (a = ``sn_a``,
+        b = ``sn_b``) for 10^3 <= N <= 10^6, flattening to the endurance
+        limit ``Se`` for N >= 10^6. This is the inverse of
+        ``cycles_to_failure`` on the reversed S-N line: Sf at
+        ``cycles_to_failure(sigma)`` recovers sigma.
+
+        Args:
+            cycles (float): Life N in cycles. Must be >= 10^3 (the
+                high-cycle fatigue range; N < 10^3 is low-cycle fatigue,
+                not modeled by this line).
+
+        Returns:
+            float: Fully reversed fatigue strength Sf in MPa; the endurance
+            limit Se for N >= 10^6.
+
+        Raises:
+            ValueError: If ``cycles`` < 10^3.
+        """
+        if cycles < _SN_LOW_CYCLE:
+            raise ValueError(
+                f"Cycles must be >= {_SN_LOW_CYCLE:g} (high-cycle fatigue "
+                "range); low-cycle fatigue (N < 10^3) is not modeled"
+            )
+        if cycles >= _SN_KNEE_CYCLES:
+            return self.endurance_limit
+        return self.sn_a * cycles ** self.sn_b
 
     def _equivalent_reversed_stress(self, stress_amplitude, mean_stress,
                                     criterion):
