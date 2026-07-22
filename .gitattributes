@@ -1,0 +1,31 @@
+# Normalize line endings: store text as LF in the repo, let Git decide
+# the working-copy ending per platform. Silences the "LF will be replaced
+# by CRLF" warnings on Windows and keeps diffs free of line-ending noise.
+* text=auto
+
+# Pin source and text formats to LF everywhere (including on Windows).
+*.py    text eol=lf
+*.rst   text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+*.cfg   text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.toml  text eol=lf
+*.ini   text eol=lf
+*.html  text eol=lf
+*.css   text eol=lf
+*.js    text eol=lf
+.gitignore    text eol=lf
+.gitattributes text eol=lf
+
+# Binary files: never normalize or diff as text.
+*.xlsx  binary
+*.xls   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.pdf   binary
+*.ico   binary
+*.zip   binary
