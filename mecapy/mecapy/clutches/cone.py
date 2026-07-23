@@ -27,32 +27,41 @@ class ConeClutch(AxialFrictionInterface):
         cone_angle (float): Half-cone angle alpha in degrees.
     """
 
-    def __init__(self, outer_diameter, inner_diameter, cone_angle, mu=None,
-                 lining=None, material="steel", name=None):
+    def __init__(self, outer_radius=None, inner_radius=None, cone_angle=None,
+                 mu=None, lining=None, material="steel", name=None,
+                 outer_diameter=None, inner_diameter=None):
         """
         Initialize a ConeClutch object.
 
         Args:
-            outer_diameter (float): Friction-face outer diameter D in mm.
-            inner_diameter (float): Friction-face inner diameter d in mm.
+            outer_radius (float): Friction-face outer radius in mm
+                (canonical). Give a radius pair OR a diameter pair.
+            inner_radius (float): Friction-face inner radius in mm.
             cone_angle (float): Half-cone angle alpha in degrees, in
-                (0, 45]. Values below ~8 degrees tend to jam.
+                (0, 45]. Values below ~8 degrees tend to jam. Required.
             mu (float): Friction coefficient. Defaults to the lining's dry
                 value when ``lining`` is given, else to the module default.
             lining (str): Optional friction-lining name from
                 :mod:`mecapy.clutches.friction_data`.
             material (str): Backing material type (default: "steel").
             name (str): Optional identifier for the clutch.
+            outer_diameter (float): Outer diameter D in mm (alternative to
+                ``outer_radius``).
+            inner_diameter (float): Inner diameter d in mm.
 
         Raises:
-            ValueError: If ``cone_angle`` is outside (0, 45], plus the
-                checks in :class:`AxialFrictionInterface`.
+            ValueError: If ``cone_angle`` is missing or outside (0, 45],
+                plus the checks in :class:`AxialFrictionInterface`.
         """
+        if cone_angle is None:
+            raise ValueError("cone_angle is required for a cone clutch")
         if not 0 < cone_angle <= 45:
             raise ValueError("Cone angle must be in (0, 45] degrees for a cone clutch")
-        super().__init__(outer_diameter, inner_diameter, mu=mu, n_faces=1,
-                         cone_angle=cone_angle, lining=lining, material=material,
-                         name=name)
+        super().__init__(outer_radius=outer_radius, inner_radius=inner_radius,
+                         mu=mu, n_faces=1, cone_angle=cone_angle,
+                         lining=lining, material=material, name=name,
+                         outer_diameter=outer_diameter,
+                         inner_diameter=inner_diameter)
 
     @property
     def face_width(self):

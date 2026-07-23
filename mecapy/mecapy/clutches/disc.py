@@ -27,14 +27,16 @@ class DiscClutch(AxialFrictionInterface):
     of friction surfaces (a single plate gripped on both sides has 2).
     """
 
-    def __init__(self, outer_diameter, inner_diameter, mu=None, n_faces=1,
-                 lining=None, material="steel", name=None):
+    def __init__(self, outer_radius=None, inner_radius=None, mu=None,
+                 n_faces=1, lining=None, material="steel", name=None,
+                 outer_diameter=None, inner_diameter=None):
         """
         Initialize a DiscClutch object.
 
         Args:
-            outer_diameter (float): Friction-face outer diameter D in mm.
-            inner_diameter (float): Friction-face inner diameter d in mm.
+            outer_radius (float): Friction-face outer radius in mm
+                (canonical). Give a radius pair OR a diameter pair.
+            inner_radius (float): Friction-face inner radius in mm.
             mu (float): Friction coefficient. Defaults to the lining's dry
                 value when ``lining`` is given, else to the module default.
             n_faces (int): Number of friction faces N (default 1).
@@ -42,13 +44,18 @@ class DiscClutch(AxialFrictionInterface):
                 :mod:`mecapy.clutches.friction_data`.
             material (str): Backing material type (default: "steel").
             name (str): Optional identifier for the clutch.
+            outer_diameter (float): Outer diameter D in mm (alternative to
+                ``outer_radius``).
+            inner_diameter (float): Inner diameter d in mm.
 
         Raises:
             ValueError: See :class:`AxialFrictionInterface`.
         """
-        super().__init__(outer_diameter, inner_diameter, mu=mu, n_faces=n_faces,
-                         cone_angle=90.0, lining=lining, material=material,
-                         name=name)
+        super().__init__(outer_radius=outer_radius, inner_radius=inner_radius,
+                         mu=mu, n_faces=n_faces, cone_angle=90.0,
+                         lining=lining, material=material, name=name,
+                         outer_diameter=outer_diameter,
+                         inner_diameter=inner_diameter)
 
     @property
     def optimal_inner_diameter(self):

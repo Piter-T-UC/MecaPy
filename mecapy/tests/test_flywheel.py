@@ -51,6 +51,24 @@ class TestFlywheelConstruction:
     def test_explicit_mass(self):
         assert Flywheel(outer_radius=0.3, mass=25.0).mass == 25.0
 
+    def test_mass_recomputes_when_radius_changes(self):
+        """Built from thickness, mass and inertia track a radius change."""
+        flywheel = Flywheel(outer_radius=0.3, thickness=0.05)
+        m0 = flywheel.mass
+        flywheel.radius = 0.4  # outer_radius alias
+        assert flywheel.mass == pytest.approx(m0 * (0.4 ** 2) / (0.3 ** 2))
+        assert flywheel.moment_of_inertia == pytest.approx(
+            0.5 * flywheel.mass * 0.4 ** 2)
+
+    def test_mass_recomputes_when_thickness_changes(self):
+        """Thickness is settable and drives mass linearly."""
+        flywheel = Flywheel(outer_radius=0.3, thickness=0.05)
+        m0 = flywheel.mass
+        flywheel.thickness = 0.10
+        assert flywheel.mass == pytest.approx(2 * m0)
+        with pytest.raises(ValueError):
+            flywheel.thickness = -1
+
     def test_exactly_one_of_thickness_or_mass(self):
         with pytest.raises(ValueError):
             Flywheel(outer_radius=0.3)

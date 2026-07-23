@@ -105,6 +105,33 @@ def _check_mesh(driver, driven):
         )
 
 
+def _stage_pinion(driver, driven):
+    """
+    Order one stage as (pinion, gear) for an AGMA rating.
+
+    :class:`~mecapy.gears.agma.AGMARating` requires the pinion to be the
+    smaller member, so a speed-increasing stage (driven smaller than the
+    driver) is swapped. A rack is always the mating member.
+
+    Args:
+        driver: Driving element of the stage.
+        driven: Driven element of the stage.
+
+    Returns:
+        tuple or None: ``(pinion, gear)`` for an AGMA-rateable stage,
+        else ``None`` (bevel and worm stages are outside AGMA 2101-D04).
+    """
+    if not isinstance(driver, CylindricalGear):
+        return None
+    if isinstance(driven, Rack):
+        return (driver, driven)
+    if not isinstance(driven, CylindricalGear):
+        return None
+    if driven.teeth < driver.teeth:
+        return (driven, driver)
+    return (driver, driven)
+
+
 def _stage_ratio(driver, driven):
     """float: Speed ratio of one stage (driver speed / driven speed)."""
     if isinstance(driver, Worm):
@@ -420,6 +447,301 @@ class Transmission:
                 raise ValueError("No rotary stage after a rack")
             speed = speed / r
         raise ValueError(f"Stage index {stage_index} out of range")
+
+    # ------------------------------------------------------------------
+    # AGMA rating of the whole train
+    # ------------------------------------------------------------------
+
+    @property
+    def agma_unrated_stages(self):
+        """list: ``(stage_index, reason)`` for every stage AGMA 2101-D04
+        does not cover (bevel and worm stages). Empty for an all-
+        cylindrical train.
+        """
+        unrated = []
+        for i, (driver, driven) in enumerate(self.stages):
+            if _stage_pinion(driver, driven) is None:
+                unrated.append((
+                    i,
+                    f"{type(driver).__name__}/{type(driven).__name__} stage - "
+                    f"AGMA 2101-D04 covers cylindrical gears only"
+                ))
+        return unrated
+
+    #: Idler bending factor applied to a gear that meshes in more than
+    #: one stage: both flanks of its teeth are loaded each revolution
+    #: (fully reversed bending) instead of only one (repeated), which
+    #: needs roughly 1/0.70 of the one-directional bending strength.
+    _IDLER_KI = 1.42
+
+    def _idler_gears(self):
+        """set: ``id()`` of every element that appears in more than one
+        stage of the train (reused as the driven of one stage and the
+        driver of the next — an idler). Used to set ``Ki_pinion``/
+        ``Ki_gear`` automatically in :meth:`rate_agma`.
+        """
+        counts = {}
+        for driver, driven in self.stages:
+            for element in (driver, driven):
+                counts[id(element)] = counts.get(id(element), 0) + 1
+        return {key for key, n in counts.items() if n > 1}
+
+    #: Rating inputs the train supplies itself; they cannot be overridden
+    #: per stage because they come from :meth:`propagate`.
+    _TRAIN_SUPPLIED = ("power_kw", "pinion_speed_rpm", "tangential_force")
+
+    def _merged_stage_kwargs(self, stage_kwargs, kwargs):
+        """Validate ``stage_kwargs`` and merge it over the global kwargs."""
+        if stage_kwargs is None:
+            return [dict(kwargs) for _ in self.stages]
+        if len(stage_kwargs) != len(self.stages):
+            raise ValueError(
+                f"stage_kwargs must have one entry per stage "
+                f"({len(self.stages)}), got {len(stage_kwargs)}"
+            )
+        for i, override in enumerate(stage_kwargs):
+            clash = set(override or ()) & set(self._TRAIN_SUPPLIED)
+            if clash:
+                raise ValueError(
+                    f"stage_kwargs[{i}] cannot set {sorted(clash)}: the "
+                    f"transmission supplies the operating point of every "
+                    f"stage from propagate()"
+                )
+        return [{**kwargs, **(s or {})} for s in stage_kwargs]
+
+    def rate_agma(self, stage_kwargs=None, Ko=1.0, Qv=7, Ks=None, ZR=1.0,
+                  KB=1.0, life_cycles=1e7, reliability=0.99, grade=1,
+                  hardness_HB=None, gear_hardness_HB=None, St=None, Sc=None,
+                  YJ_pinion=None, YJ_gear=None, condition="commercial",
+                  crowned=False, temperature_factor=1.0,
+                  temperature_celsius=None):
+        """
+        AGMA bending and pitting rating of every stage of the train.
+
+        Calls :meth:`propagate` first, so each mesh is rated at its own
+        propagated speed and power (including the stage efficiencies).
+        The smaller member of each stage is taken as the pinion. Stages
+        AGMA 2101-D04 does not cover (bevel, worm) are skipped — see
+        :attr:`agma_unrated_stages`.
+
+        Every rating input of :class:`~mecapy.gears.agma.AGMARating` is
+        accepted here except the operating point (``power_kw``,
+        ``pinion_speed_rpm``, ``tangential_force``), which the train
+        supplies per stage. Values given here apply to all stages;
+        ``stage_kwargs`` overrides them stage by stage.
+
+        ``Ki_pinion``/``Ki_gear`` (idler bending factor) are also set
+        automatically per stage: 1.42 for a member that appears in more
+        than one stage of the train (an idler — the same gear object
+        reused as driven of one stage and driver of the next), else 1.0.
+        Only the idler member gets the factor, not its mate. Override
+        with ``stage_kwargs`` if a specific stage needs a different value.
+
+        Note: the AGMA J-factor tables assume standard (profile shift
+        x = 0) tooth proportions; ratings for shifted gears are
+        approximate.
+
+        Args:
+            stage_kwargs (list): Optional per-stage keyword overrides,
+                one dict (or None) per stage, indexed by stage index —
+                including unrated stages, so the indices stay aligned.
+                Entries override the arguments below.
+            Ko (float): Overload factor (default 1.0). Typical values:
+                uniform/uniform 1.0, light shock 1.25, moderate shock
+                1.5, heavy shock 1.75+.
+            Qv (int): AGMA quality number for Kv, 3 to 11 (default 7).
+            Ks (float): Size factor. Default ``None`` computes it per
+                stage from that stage's pinion module via
+                :func:`~mecapy.gears.agma.size_factor` — so a coarse
+                output stage is penalised more than a fine input stage.
+                Give a number to override the table everywhere.
+            ZR (float): Surface-condition factor (default 1.0).
+            KB (float): Rim-thickness factor (default 1.0, solid gear);
+                see :func:`~mecapy.gears.agma.rim_thickness_factor`.
+            life_cycles (float): Load cycles for YN/ZN (default 1e7).
+                Note that a downstream stage turns fewer cycles for the
+                same running time — set it per stage when that matters.
+            reliability (float): Survival probability for YZ (default
+                0.99).
+            grade (int): AGMA steel grade for the allowable-stress fits
+                (default 1). Ignored for a gear whose material is a
+                :class:`~mecapy.gears.GearMaterial` supplying its own.
+            hardness_HB (float): Brinell hardness for the through-
+                hardened allowable-stress fits. Give this OR explicit
+                ``St``/``Sc``; defaults to each pinion's own
+                :class:`~mecapy.gears.GearMaterial` hardness.
+            gear_hardness_HB (float): Gear hardness if different from
+                the pinion (enables the ZW factor).
+            St (float): Explicit allowable bending stress number in MPa.
+            Sc (float): Explicit allowable contact stress number in MPa.
+            YJ_pinion (float): Override for the pinion bending geometry
+                factor J. Tooth-count specific, so it usually belongs in
+                ``stage_kwargs`` rather than here.
+            YJ_gear (float): Override for the gear J, same caveat.
+            condition (str): Mounting condition for KH — "open",
+                "commercial" (default), "precision" or "extra_precision".
+            crowned (bool): Crowned teeth for KH (default False).
+            temperature_factor (float): Explicit Y_theta (default 1.0).
+                Give this OR ``temperature_celsius``, not both.
+            temperature_celsius (float): Operating (oil) temperature in
+                degrees Celsius, converted to Y_theta.
+
+        Returns:
+            list: One :class:`~mecapy.gears.agma.AGMARating` per rateable
+            stage, each carrying a ``stage_index`` attribute. Every
+            stress and factor on them stays live (recomputed on access).
+
+        Raises:
+            ValueError: If there are no stages, the first driver has no
+                power/speed, ``stage_kwargs`` has the wrong length or
+                tries to set the operating point, or a stage cannot be
+                rated (message prefixed with its index).
+        """
+        from .agma import AGMARating
+
+        kwargs = dict(
+            Ko=Ko, Qv=Qv, Ks=Ks, ZR=ZR, KB=KB, life_cycles=life_cycles,
+            reliability=reliability, grade=grade, hardness_HB=hardness_HB,
+            gear_hardness_HB=gear_hardness_HB, St=St, Sc=Sc,
+            YJ_pinion=YJ_pinion, YJ_gear=YJ_gear, condition=condition,
+            crowned=crowned, temperature_factor=temperature_factor,
+            temperature_celsius=temperature_celsius,
+        )
+        self.propagate()
+        merged = self._merged_stage_kwargs(stage_kwargs, kwargs)
+        idlers = self._idler_gears()
+        ratings = []
+        for i, (driver, driven) in enumerate(self.stages):
+            pair = _stage_pinion(driver, driven)
+            if pair is None:
+                continue
+            pinion, gear = pair
+            stage_args = dict(merged[i])
+            stage_args.setdefault(
+                "Ki_pinion", self._IDLER_KI if id(pinion) in idlers else 1.0)
+            if not isinstance(gear, Rack):
+                stage_args.setdefault(
+                    "Ki_gear", self._IDLER_KI if id(gear) in idlers else 1.0)
+            try:
+                rating = AGMARating(pinion, gear,
+                                    power_kw=pinion.power_kw,
+                                    pinion_speed_rpm=pinion.speed_rpm,
+                                    **stage_args)
+            except ValueError as exc:
+                raise ValueError(f"Stage {i}: {exc}") from exc
+            rating.stage_index = i
+            ratings.append(rating)
+        return ratings
+
+    def agma_governing(self, stage_kwargs=None, Ko=1.0, Qv=7, Ks=None,
+                       ZR=1.0, KB=1.0, life_cycles=1e7, reliability=0.99,
+                       grade=1, hardness_HB=None, gear_hardness_HB=None,
+                       St=None, Sc=None, YJ_pinion=None, YJ_gear=None,
+                       condition="commercial", crowned=False,
+                       temperature_factor=1.0, temperature_celsius=None):
+        """
+        Worst bending and pitting safety factor over the whole train.
+
+        Bending and pitting may be governed by different stages, so each
+        reports its own stage index.
+
+        Args:
+            stage_kwargs (list): Per-stage overrides, see :meth:`rate_agma`.
+            Ko, Qv, Ks, ZR, KB, life_cycles, reliability, grade,
+                hardness_HB, gear_hardness_HB, St, Sc, YJ_pinion, YJ_gear,
+                condition, crowned, temperature_factor,
+                temperature_celsius: Rating arguments, forwarded to
+                :meth:`rate_agma` (see its Args for units and defaults).
+
+        Returns:
+            dict: Keys "SF" (minimum bending safety factor over both
+            members of every stage), "SF_stage", "SH" (minimum pitting
+            safety factor) and "SH_stage".
+
+        Raises:
+            ValueError: If no stage of the train can be rated.
+        """
+        ratings = self.rate_agma(
+            stage_kwargs, Ko=Ko, Qv=Qv, Ks=Ks, ZR=ZR, KB=KB,
+            life_cycles=life_cycles, reliability=reliability, grade=grade,
+            hardness_HB=hardness_HB, gear_hardness_HB=gear_hardness_HB,
+            St=St, Sc=Sc, YJ_pinion=YJ_pinion, YJ_gear=YJ_gear,
+            condition=condition, crowned=crowned,
+            temperature_factor=temperature_factor,
+            temperature_celsius=temperature_celsius,
+        )
+        if not ratings:
+            raise ValueError("No stage of this transmission is AGMA-rateable")
+        best_sf = best_sh = None
+        for r in ratings:
+            for sf in (r.SF_pinion, r.SF_gear):
+                if sf is not None and (best_sf is None or sf < best_sf[0]):
+                    best_sf = (sf, r.stage_index)
+            if best_sh is None or r.SH < best_sh[0]:
+                best_sh = (r.SH, r.stage_index)
+        return {"SF": best_sf[0], "SF_stage": best_sf[1],
+                "SH": best_sh[0], "SH_stage": best_sh[1]}
+
+    def agma_summary(self, stage_kwargs=None, Ko=1.0, Qv=7, Ks=None,
+                     ZR=1.0, KB=1.0, life_cycles=1e7, reliability=0.99,
+                     grade=1, hardness_HB=None, gear_hardness_HB=None,
+                     St=None, Sc=None, YJ_pinion=None, YJ_gear=None,
+                     condition="commercial", crowned=False,
+                     temperature_factor=1.0, temperature_celsius=None):
+        """
+        Human-readable AGMA rating of the whole train.
+
+        Args:
+            stage_kwargs (list): Per-stage overrides, see :meth:`rate_agma`.
+            Ko, Qv, Ks, ZR, KB, life_cycles, reliability, grade,
+                hardness_HB, gear_hardness_HB, St, Sc, YJ_pinion, YJ_gear,
+                condition, crowned, temperature_factor,
+                temperature_celsius: Rating arguments, forwarded to
+                :meth:`rate_agma` (see its Args for units and defaults).
+
+        Returns:
+            str: Multi-line report: one
+            :meth:`~mecapy.gears.agma.AGMARating.summary` per rateable
+            stage, the unrated stages, and the governing safety factors.
+        """
+        kwargs = dict(
+            Ko=Ko, Qv=Qv, Ks=Ks, ZR=ZR, KB=KB, life_cycles=life_cycles,
+            reliability=reliability, grade=grade, hardness_HB=hardness_HB,
+            gear_hardness_HB=gear_hardness_HB, St=St, Sc=Sc,
+            YJ_pinion=YJ_pinion, YJ_gear=YJ_gear, condition=condition,
+            crowned=crowned, temperature_factor=temperature_factor,
+            temperature_celsius=temperature_celsius,
+        )
+        ratings = self.rate_agma(stage_kwargs, **kwargs)
+        lines = [
+            f"Transmission AGMA Rating - {self.name or 'unnamed'}",
+            "=" * 40,
+            f"Stages: {len(self.stages)}, rated: {len(ratings)}",
+            "",
+        ]
+        for r in ratings:
+            lines.append(f"--- Stage {r.stage_index} ---")
+            lines.append(r.summary())
+            lines.append("")
+        for index, reason in self.agma_unrated_stages:
+            lines.append(f"Stage {index} not rated: {reason}")
+        if ratings and all(r.has_allowables for r in ratings):
+            g = self.agma_governing(stage_kwargs, **kwargs)
+            lines += [
+                "=" * 40,
+                f"Governing bending: SF={g['SF']:.2f} "
+                f"(stage {g['SF_stage']})",
+                f"Governing pitting: SH={g['SH']:.2f} "
+                f"(stage {g['SH_stage']})",
+            ]
+        elif ratings:
+            lines += [
+                "=" * 40,
+                f"Material selection (SF = SH = 1): every stage needs "
+                f"St >= {max(r.required_St() for r in ratings):.1f} MPa "
+                f"and Sc >= {max(r.required_Sc() for r in ratings):.1f} MPa",
+            ]
+        return "\n".join(lines)
 
     def _require_stages(self):
         if not self.stages:

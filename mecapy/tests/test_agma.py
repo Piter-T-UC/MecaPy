@@ -42,6 +42,21 @@ class TestFactors:
         assert agma.rim_thickness_factor(0.8) == pytest.approx(1.648,
                                                                abs=0.01)
 
+    def test_size_factor_bands(self):
+        """Ks steps up with tooth size; listed modules are upper bounds."""
+        assert agma.size_factor(1.5) == 1.00
+        assert agma.size_factor(5.0) == 1.00
+        assert agma.size_factor(5.5) == 1.05
+        assert agma.size_factor(6.0) == 1.05
+        assert agma.size_factor(8.0) == 1.15
+        assert agma.size_factor(12.0) == 1.25
+        assert agma.size_factor(20.0) == 1.40
+        assert agma.size_factor(30.0) == 1.40      # clamped above the table
+
+    def test_size_factor_validation(self):
+        with pytest.raises(ValueError):
+            agma.size_factor(0)
+
     def test_elastic_coefficient_steel(self):
         """ZE for steel on steel is about 190 sqrt(MPa)."""
         from mecapy.materials import get_material_properties
@@ -183,11 +198,99 @@ class TestRatingValidation:
             AGMARating(pinion, gear, power_kw=3.0, tangential_force=700.0,
                        pinion_speed_rpm=1800, hardness_HB=240)
 
-    def test_allowables_required(self):
+    def test_ki_defaults_to_one_and_scales_bending_stress(self):
+        """Ki_pinion/Ki_gear default to 1.0; a non-default value scales
+        only its own member's bending stress, not the other member's.
+        """
+        pinion = SpurGear(17, module=2.5, face_width=40.0)
+        gear = SpurGear(52, module=2.5, face_width=40.0)
+        base = AGMARating(pinion, gear, power_kw=3.0, pinion_speed_rpm=1800)
+        assert base.Ki_pinion == 1.0
+        assert base.Ki_gear == 1.0
+
+        idler_pinion = AGMARating(pinion, gear, power_kw=3.0,
+                                  pinion_speed_rpm=1800, Ki_pinion=1.42)
+        assert idler_pinion.bending_stress_pinion == pytest.approx(
+            base.bending_stress_pinion * 1.42)
+        assert idler_pinion.bending_stress_gear == pytest.approx(
+            base.bending_stress_gear)
+
+    def test_ki_validation(self):
+        """Ki_pinion/Ki_gear must be strictly positive."""
         pinion = SpurGear(17, module=2.5, face_width=40.0)
         gear = SpurGear(52, module=2.5, face_width=40.0)
         with pytest.raises(ValueError):
-            AGMARating(pinion, gear, power_kw=3.0, pinion_speed_rpm=1800)
+            AGMARating(pinion, gear, power_kw=3.0, pinion_speed_rpm=1800,
+                       Ki_pinion=0)
+        with pytest.raises(ValueError):
+            AGMARating(pinion, gear, power_kw=3.0, pinion_speed_rpm=1800,
+                       Ki_gear=-1)
+
+    def test_allowables_required_only_when_used(self):
+        """Without material data the stresses work; the strengths raise."""
+        pinion = SpurGear(17, module=2.5, face_width=40.0)
+        gear = SpurGear(52, module=2.5, face_width=40.0)
+        r = AGMARating(pinion, gear, power_kw=3.0, pinion_speed_rpm=1800)
+        assert r.has_allowables is False
+        assert r.bending_stress_pinion > 0
+        assert r.contact_stress > 0
+        for attr in ("St", "Sc", "SF_pinion", "SH"):
+            with pytest.raises(ValueError):
+                getattr(r, attr)
+
+    def test_required_st_range(self):
+        """max_safety_factor turns required_St into a (min, max) range."""
+        pinion = SpurGear(17, module=2.5, face_width=40.0)
+        gear = SpurGear(52, module=2.5, face_width=40.0)
+        r = AGMARating(pinion, gear, power_kw=3.0, pinion_speed_rpm=1800)
+        low, high = r.required_St(1.2, max_safety_factor=2.0)
+        assert low == pytest.approx(r.required_St(1.2))
+        assert high == pytest.approx(r.required_St(2.0))
+        assert low < high
+
+    def test_required_st_range_validation(self):
+        """max_safety_factor must exceed safety_factor."""
+        pinion = SpurGear(17, module=2.5, face_width=40.0)
+        gear = SpurGear(52, module=2.5, face_width=40.0)
+        r = AGMARating(pinion, gear, power_kw=3.0, pinion_speed_rpm=1800)
+        with pytest.raises(ValueError):
+            r.required_St(1.5, max_safety_factor=1.5)
+        with pytest.raises(ValueError):
+            r.required_St(1.5, max_safety_factor=1.0)
+
+    def test_required_sc_range(self):
+        """max_safety_factor turns required_Sc into a (min, max) range."""
+        pinion = SpurGear(17, module=2.5, face_width=40.0)
+        gear = SpurGear(52, module=2.5, face_width=40.0)
+        r = AGMARating(pinion, gear, power_kw=3.0, pinion_speed_rpm=1800)
+        low, high = r.required_Sc(1.2, max_safety_factor=2.0)
+        assert low == pytest.approx(r.required_Sc(1.2))
+        assert high == pytest.approx(r.required_Sc(2.0))
+        assert low < high
+
+    def test_required_sc_range_validation(self):
+        """max_safety_factor must exceed safety_factor."""
+        pinion = SpurGear(17, module=2.5, face_width=40.0)
+        gear = SpurGear(52, module=2.5, face_width=40.0)
+        r = AGMARating(pinion, gear, power_kw=3.0, pinion_speed_rpm=1800)
+        with pytest.raises(ValueError):
+            r.required_Sc(1.5, max_safety_factor=1.5)
+
+    def test_required_strengths(self):
+        """required_strengths bundles required_St and required_Sc."""
+        pinion = SpurGear(17, module=2.5, face_width=40.0)
+        gear = SpurGear(52, module=2.5, face_width=40.0)
+        r = AGMARating(pinion, gear, power_kw=3.0, pinion_speed_rpm=1800)
+
+        both = r.required_strengths(1.3)
+        assert both == {
+            "St": pytest.approx(r.required_St(1.3)),
+            "Sc": pytest.approx(r.required_Sc(1.3)),
+        }
+
+        ranged = r.required_strengths(1.2, max_safety_factor=2.0)
+        assert ranged["St"] == pytest.approx(r.required_St(1.2, max_safety_factor=2.0))
+        assert ranged["Sc"] == pytest.approx(r.required_Sc(1.2, max_safety_factor=2.0))
 
     def test_explicit_allowables(self):
         """Named gear-steel entries can feed St/Sc directly."""
@@ -242,6 +345,73 @@ class TestRatingValidation:
         spur_zi = agma.geometry_factor_I(SpurGear(20, module=3.0),
                                          SpurGear(60, module=3.0))
         assert rating.ZI > spur_zi
+
+
+class TestRatingIsLazy:
+    """D3: the rating recomputes from its inputs and never caches (Phase 4)."""
+
+    def _rating(self):
+        pinion = SpurGear(17, module=2.5, face_width=40.0)
+        gear = SpurGear(52, module=2.5, face_width=40.0)
+        return AGMARating(pinion, gear, power_kw=3.0, pinion_speed_rpm=1800,
+                          hardness_HB=240), pinion, gear
+
+    def test_safety_factor_recomputes_on_face_width_change(self):
+        """Narrowing the governing (narrower) member lowers the SFs."""
+        rating, pinion, gear = self._rating()
+        sf0, sh0 = rating.SF_pinion, rating.SH
+        gear.face_width = 25.0  # now the narrower member governs b
+        assert rating.face_width == 25.0
+        assert rating.SF_pinion < sf0
+        assert rating.SH < sh0
+
+    def test_stress_recomputes_on_overload_change(self):
+        """Raising the overload factor Ko raises the bending stress."""
+        rating, _, _ = self._rating()
+        sigma0 = rating.bending_stress_pinion
+        rating.Ko = 1.5
+        assert rating.bending_stress_pinion == pytest.approx(1.5 * sigma0)
+
+    def test_ks_follows_the_module(self):
+        """Ks comes from the module and tracks a change to it."""
+        rating, pinion, _ = self._rating()
+        assert rating.Ks == 1.00                    # module 2.5
+        pinion.module = 8.0
+        assert rating.Ks == 1.15
+
+    def test_ks_override_wins(self):
+        """An explicit Ks bypasses the module table."""
+        pinion = SpurGear(17, module=10.0, face_width=40.0)
+        gear = SpurGear(52, module=10.0, face_width=40.0)
+        rating = AGMARating(pinion, gear, power_kw=3.0, pinion_speed_rpm=1800,
+                            hardness_HB=240, Ks=1.0)
+        assert rating.Ks == 1.0                     # table would give 1.25
+        rating.Ks = None                            # back to the table
+        assert rating.Ks == 1.25
+        with pytest.raises(ValueError):
+            rating.Ks = 0
+
+    def test_ks_raises_the_stress(self):
+        """A coarse-module mesh is penalised by Ks."""
+        fine = AGMARating(SpurGear(17, module=4.0, face_width=40.0),
+                          SpurGear(52, module=4.0, face_width=40.0),
+                          tangential_force=1000.0, pinion_speed_rpm=100,
+                          hardness_HB=240)
+        coarse = AGMARating(SpurGear(17, module=10.0, face_width=40.0),
+                            SpurGear(52, module=10.0, face_width=40.0),
+                            tangential_force=1000.0, pinion_speed_rpm=100,
+                            hardness_HB=240)
+        assert fine.Ks == 1.00 and coarse.Ks == 1.25
+        assert coarse._common_load > fine._common_load
+
+    def test_yj_override_used_verbatim(self):
+        """A YJ override is returned as-is, not recomputed."""
+        pinion = SpurGear(17, module=2.5, face_width=40.0)
+        gear = SpurGear(52, module=2.5, face_width=40.0)
+        rating = AGMARating(pinion, gear, power_kw=3.0, pinion_speed_rpm=1800,
+                            hardness_HB=240, YJ_pinion=0.42, YJ_gear=0.48)
+        assert rating.YJ_pinion == 0.42
+        assert rating.YJ_gear == 0.48
 
 
 class TestGearMaterial:
@@ -318,5 +488,7 @@ class TestGearMaterial:
         """A plain string material has no hardness to fall back on."""
         pinion = SpurGear(20, module=3.0, face_width=40.0, material="steel")
         gear = SpurGear(60, module=3.0, face_width=40.0)
-        with pytest.raises(ValueError):
-            AGMARating(pinion, gear, power_kw=10.0, pinion_speed_rpm=1200)
+        r = AGMARating(pinion, gear, power_kw=10.0, pinion_speed_rpm=1200)
+        assert r.has_allowables is False
+        with pytest.raises(ValueError, match="hardness_HB"):
+            _ = r.SF_pinion

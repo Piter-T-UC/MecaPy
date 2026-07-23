@@ -82,26 +82,105 @@ class Bearing(MechaElement):
                 type.
         """
         super().__init__(name=name, material=material)
-        if bore_diameter <= 0:
-            raise ValueError("Bore diameter must be strictly positive")
-        if width <= 0:
-            raise ValueError("Width must be strictly positive")
-        if outer_diameter <= bore_diameter:
-            raise ValueError("Outer diameter must be larger than bore diameter")
-        if C10 is not None and C10 <= 0:
-            raise ValueError("Dynamic load rating C10 must be strictly positive")
-        if C0 is not None and C0 <= 0:
-            raise ValueError("Static load rating C0 must be strictly positive")
-        if rating_life <= 0:
-            raise ValueError("Rating life must be strictly positive")
+        # Every input is routed through a validating property setter below,
+        # so mutating a dimension or rating after construction re-checks it
+        # (and, for the diameters, the outer > bore invariant).
         self.bore_diameter = bore_diameter
         self.outer_diameter = outer_diameter
         self.width = width
-        self.bearing_type = bearing_type
-        self.life_exponent = get_life_exponent(bearing_type)
+        self.bearing_type = bearing_type  # validating setter rejects bad types
         self.C10 = C10
         self.C0 = C0
         self.rating_life = rating_life
+
+    # ---- Settable primary inputs (validate; never cache a derived value) ----
+
+    @property
+    def bore_diameter(self):
+        """float: Bearing bore diameter in mm."""
+        return self._bore_diameter
+
+    @bore_diameter.setter
+    def bore_diameter(self, value):
+        if value <= 0:
+            raise ValueError("Bore diameter must be strictly positive")
+        if value >= getattr(self, "_outer_diameter", math.inf):
+            raise ValueError("Bore diameter must be smaller than outer diameter")
+        self._bore_diameter = value
+
+    @property
+    def outer_diameter(self):
+        """float: Bearing outer diameter in mm."""
+        return self._outer_diameter
+
+    @outer_diameter.setter
+    def outer_diameter(self, value):
+        if value <= self._bore_diameter:
+            raise ValueError("Outer diameter must be larger than bore diameter")
+        self._outer_diameter = value
+
+    @property
+    def width(self):
+        """float: Bearing width in mm."""
+        return self._width
+
+    @width.setter
+    def width(self, value):
+        if value <= 0:
+            raise ValueError("Width must be strictly positive")
+        self._width = value
+
+    @property
+    def C10(self):
+        """float or None: Basic dynamic load rating in N."""
+        return self._C10
+
+    @C10.setter
+    def C10(self, value):
+        if value is not None and value <= 0:
+            raise ValueError("Dynamic load rating C10 must be strictly positive")
+        self._C10 = value
+
+    @property
+    def C0(self):
+        """float or None: Static load rating in N."""
+        return self._C0
+
+    @C0.setter
+    def C0(self, value):
+        if value is not None and value <= 0:
+            raise ValueError("Static load rating C0 must be strictly positive")
+        self._C0 = value
+
+    @property
+    def rating_life(self):
+        """float: Life associated with C10 in revolutions."""
+        return self._rating_life
+
+    @rating_life.setter
+    def rating_life(self, value):
+        if value <= 0:
+            raise ValueError("Rating life must be strictly positive")
+        self._rating_life = value
+
+    @property
+    def bearing_type(self):
+        """str: Bearing type (sets the load-life exponent)."""
+        return self._bearing_type
+
+    @bearing_type.setter
+    def bearing_type(self, value):
+        get_life_exponent(value)  # raises ValueError on an unknown type
+        self._bearing_type = value
+
+    @property
+    def life_exponent(self):
+        """float: Load-life exponent a (3 for ball, 10/3 for roller).
+
+        Derived from :attr:`bearing_type`, so changing the type updates it
+        (and every life result) on the next access — never cached.
+        """
+        return get_life_exponent(self.bearing_type)
 
     def _require_c10(self):
         if self.C10 is None:

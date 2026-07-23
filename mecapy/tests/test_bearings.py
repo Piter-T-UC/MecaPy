@@ -102,6 +102,28 @@ class TestBearingLife:
         bearing = make_ball_bearing(bearing_type="roller")
         assert isclose(bearing.life(7000.0), 1e6 * 5.0 ** (10.0 / 3.0), rel_tol=1e-4)
 
+    def test_setters_revalidate_and_keep_invariant(self):
+        """Mutating a dimension/rating re-runs the constructor's checks."""
+        bearing = make_ball_bearing()
+        bearing.bore_diameter = 30.0  # valid: below the outer diameter
+        assert bearing.bore_diameter == 30.0
+        with pytest.raises(ValueError):
+            bearing.outer_diameter = 10.0  # not larger than the bore
+        with pytest.raises(ValueError):
+            bearing.width = 0
+        with pytest.raises(ValueError):
+            bearing.C10 = -1
+
+    def test_life_exponent_recomputes_on_type_change(self):
+        """Changing bearing_type updates life_exponent (and life) at once."""
+        bearing = make_ball_bearing()
+        assert bearing.life_exponent == 3.0
+        bearing.bearing_type = "roller"
+        assert bearing.life_exponent == pytest.approx(10.0 / 3.0)
+        assert isclose(bearing.life(7000.0), 1e6 * 5.0 ** (10.0 / 3.0), rel_tol=1e-4)
+        with pytest.raises(ValueError):
+            bearing.bearing_type = "magnetic"
+
     def test_life_hours(self):
         """Life in hours divides by 60*rpm."""
         bearing = make_ball_bearing()

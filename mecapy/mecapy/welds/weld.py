@@ -12,7 +12,11 @@ Units: geometry in mm, forces in N, moments in N*mm, stresses in MPa.
 """
 
 from ..base import MechaElement
-from .electrode_data import AISC_SHEAR_ALLOWABLE_FACTOR, get_electrode
+from .electrode_data import (
+    AISC_SHEAR_ALLOWABLE_FACTOR,
+    BASE_METAL_SHEAR_ALLOWABLE_FACTOR,
+    get_electrode,
+)
 from .geometry import WeldPath
 
 # Fillet-weld throat factor: throat = 0.707 * leg (45-degree fillet).
@@ -153,6 +157,29 @@ class Weld(MechaElement):
         ``0.30 * electrode tensile strength`` (Shigley Table 9-4).
         """
         return AISC_SHEAR_ALLOWABLE_FACTOR * self.electrode_tensile
+
+    @property
+    def base_metal_allowable(self):
+        """float: AISC allowable shear on the adjacent base metal in MPa.
+
+        ``0.40 * base-metal yield strength`` (Shigley Table 9-5/9-6). This
+        is the second limit a welded joint must satisfy, alongside the
+        electrode :attr:`allowable_stress`; the attached member can shear
+        through even when the weld metal is safe.
+        """
+        sy_base = self.material_properties["yield_strength"] / 1e6  # Pa -> MPa
+        return BASE_METAL_SHEAR_ALLOWABLE_FACTOR * sy_base
+
+    @property
+    def base_metal_factor(self):
+        """float: Throat-to-leg stress ratio, throat / size.
+
+        The group stresses are computed on the throat; the base metal
+        shears on the weld leg (= ``size``), a larger area for a fillet, so
+        the base-metal stress is this fraction of the throat stress (0.707
+        for a fillet, 1 for a butt weld).
+        """
+        return self.throat / self.size
 
     def __repr__(self):
         return (

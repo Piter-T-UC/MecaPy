@@ -10,12 +10,196 @@ from sympy import Rational, Symbol
 
 from ..base import MechaElement
 from ..beams import Beam
+from ..materials import CyclicLoadCases, Material
 from .kt_data import get_kt_groove, get_kt_shoulder_fillet
 
 _X = Symbol("x")  # mecapy.beams.Beam's own sympy variable, matched here for substitution
 
+# Shigley Ch. 7 distortion-energy (DE) shaft criteria -> the equivalent
+# Material mean-stress criterion. "DE-" just means the alternating/mean
+# stresses fed in are von Mises equivalents (Eq. 7-5/7-6); the safety-factor
+# algebra (Eqs. 7-9..7-12) is identical to the Material lines, so Shaft
+# reuses Material.fatigue_safety_factor rather than re-deriving them.
+_SHAFT_CRITERIA = {
+    "de-goodman": "goodman",
+    "de-soderberg": "soderberg",
+    "de-gerber": "gerber",
+    "de-asme-elliptic": "asme_elliptic",
+}
 
-class Shaft(MechaElement):
+
+class _ShaftFatigue:
+    """Shigley Ch. 7 infinite-life fatigue, shared by Shaft and SteppedShaft.
+
+    Subclasses supply :meth:`_fatigue_sections`, which lists the critical
+    sections (grooves, and for a stepped shaft the fillets) each already
+    decomposed into alternating/mean von Mises stresses. Everything else —
+    material resolution, the DE criteria, the public analysis and the
+    inverse diameter design — lives here so both shaft classes share one
+    implementation.
+
+    Units: geometry mm, moments/torque N*mm, stresses/strengths MPa.
+    """
+
+    def _fatigue_material(self):
+        """Material: fatigue-capable material for this element.
+
+        Returns the assigned :class:`~mecapy.materials.Material` as-is, or
+        wraps a database name in a default (machined, kb = 1) ``Material``.
+        For a meaningful endurance limit pass a configured ``Material``
+        (surface finish, size, reliability); a bare name uses defaults.
+        """
+        if isinstance(self.material, Material):
+            return self.material
+        return Material(self.material)
+
+    def _base_criterion(self, criterion):
+        """str: Map a DE-<name> shaft criterion to its Material criterion."""
+        key = criterion.strip().lower()
+        if key not in _SHAFT_CRITERIA:
+            raise ValueError(
+                f"Unknown criterion {criterion!r}. Available: "
+                f"{', '.join(sorted(_SHAFT_CRITERIA))}"
+            )
+        return _SHAFT_CRITERIA[key]
+
+    @staticmethod
+    def _kf(kt, radius, loading, material):
+        """float: Fatigue stress-concentration factor Kf for a section.
+
+        Combines the geometric Kt with the Neuber notch sensitivity
+        q = ``material.notch_sensitivity(radius, loading)`` via
+        Kf = 1 + q*(Kt - 1) (Shigley Eqs. 6-32/6-34).
+        """
+        q = material.notch_sensitivity(radius, loading)
+        return Material.fatigue_stress_concentration_factor(kt, q)
+
+    def _shaft_criterion(self, sigma_a, sigma_m, material, criterion):
+        """float: Fatigue safety factor nf for a von Mises (sigma_a, sigma_m).
+
+        Delegates to the Material DE algebra (``_fatigue_nf``, Se/Sut/Sy from
+        the material). The unvalidated form is used deliberately: the inverse
+        design in :meth:`min_diameter_for` probes thin diameters where the
+        mean stress exceeds Sut — there the Goodman/Gerber formulas stay
+        well-defined (a small nf < 1, i.e. failure), which the public
+        validated method would reject. A section with no alternating stress
+        has infinite fatigue life.
+        """
+        if sigma_a <= 0:
+            return math.inf
+        return material._fatigue_nf(
+            sigma_a, sigma_m, self._base_criterion(criterion))
+
+    def _section_nf(self, diameter, Ma, Mm, Ta, Tm, kf, kfs, material,
+                    criterion):
+        """tuple: (nf, sigma_a, sigma_m) for a section (Shigley Eq. 7-5/7-6).
+
+        von Mises alternating/mean stresses on a solid round section of
+        ``diameter`` (mm) from alternating/mean bending moments Ma/Mm and
+        torques Ta/Tm (N*mm), with Kf on bending and Kfs on torsion; axial
+        load is neglected (standard shaft assumption).
+        """
+        inv = 1.0 / (math.pi * diameter ** 3)
+        sa = math.sqrt((32 * kf * Ma * inv) ** 2
+                       + 3 * (16 * kfs * Ta * inv) ** 2)
+        sm = math.sqrt((32 * kf * Mm * inv) ** 2
+                       + 3 * (16 * kfs * Tm * inv) ** 2)
+        return self._shaft_criterion(sa, sm, material, criterion), sa, sm
+
+    def fatigue_analysis(self, torque=0.0, torque_alt=0.0,
+                         criterion="DE-Goodman"):
+        """
+        Infinite-life fatigue safety factor per critical section (Ch. 7).
+
+        Each stress riser (groove, plus fillets on a stepped shaft) is
+        decomposed into alternating/mean von Mises stresses and rated with
+        the chosen distortion-energy criterion. Bending mean/alternating
+        parts follow each load's ``nature`` (a constant load on a rotating
+        shaft gives fully reversed bending, Mm = 0); the steady torque is
+        the mean part Tm and ``torque_alt`` its alternating amplitude Ta.
+
+        Args:
+            torque (float): Steady (mean) torque Tm in N*mm (default: 0).
+            torque_alt (float): Alternating torque amplitude Ta in N*mm
+                (default: 0, i.e. a constant torque).
+            criterion (str): One of ``DE-Goodman``, ``DE-Soderberg``,
+                ``DE-Gerber``, ``DE-ASME-Elliptic`` (default: DE-Goodman).
+
+        Returns:
+            dict: ``{position_mm: {"nf", "sigma_a", "sigma_m", "kf",
+            "kfs"}}`` — nf the fatigue safety factor, sigma_a/sigma_m the
+            von Mises stresses (MPa), kf/kfs the bending/torsion Kf.
+
+        Raises:
+            ValueError: If ``criterion`` is unknown, or a section is
+                stressed beyond the criterion's mean-strength limit.
+        """
+        return {
+            s["position"]: {
+                "nf": s["nf"], "sigma_a": s["sigma_a"],
+                "sigma_m": s["sigma_m"], "kf": s["kf"], "kfs": s["kfs"],
+            }
+            for s in self._fatigue_sections(torque, torque_alt, criterion)
+        }
+
+    def min_diameter_for(self, nf_target, torque=0.0, torque_alt=0.0,
+                         criterion="DE-Goodman"):
+        """
+        Smallest diameter meeting ``nf_target`` at the governing section.
+
+        Sizes the governing (lowest-nf) critical section, holding its Kf/Kfs
+        fixed (the standard Shigley design step: assume the concentration,
+        solve for d, then re-check). Re-evaluating the criterion at the
+        returned diameter with that section's Kf reproduces ``nf_target``.
+
+        Args:
+            nf_target (float): Target fatigue safety factor. Strictly
+                positive.
+            torque (float): Steady torque Tm in N*mm (default: 0).
+            torque_alt (float): Alternating torque Ta in N*mm (default: 0).
+            criterion (str): DE criterion (default: DE-Goodman).
+
+        Returns:
+            float: Minimum section diameter in mm.
+
+        Raises:
+            ValueError: If ``nf_target`` is not strictly positive, there
+                are no sections to size, or the governing section carries no
+                alternating stress (fatigue does not size it).
+        """
+        if nf_target <= 0:
+            raise ValueError("nf_target must be strictly positive")
+        sections = self._fatigue_sections(torque, torque_alt, criterion)
+        if not sections:
+            raise ValueError("No critical sections to size; add a groove first")
+        gov = min(sections, key=lambda s: s["nf"])
+        if not math.isfinite(gov["nf"]):
+            raise ValueError(
+                "Governing section carries no alternating stress; "
+                "fatigue does not size it"
+            )
+
+        def nf_at(d):
+            return self._section_nf(d, gov["Ma"], gov["Mm"], gov["Ta"],
+                                    gov["Tm"], gov["kf"], gov["kfs"],
+                                    gov["material"], criterion)[0]
+
+        lo, hi = 1e-3, 1.0
+        while nf_at(hi) < nf_target:
+            hi *= 2
+            if hi > 1e6:
+                raise ValueError(
+                    "Cannot reach nf_target within a plausible diameter")
+        for _ in range(100):
+            mid = 0.5 * (lo + hi)
+            if nf_at(mid) < nf_target:
+                lo = mid
+            else:
+                hi = mid
+        return hi
+
+
+class Shaft(_ShaftFatigue, CyclicLoadCases, MechaElement):
     """
     Shaft design and analysis.
 
@@ -140,10 +324,15 @@ class Shaft(MechaElement):
         self._supports.append((location, kind))
         return self
 
-    def forces(self, loc=0, fx=0, fy=0, fz=0, mx=0, my=0, mz=0):
+    def add_load(self, loc=0, fx=0, fy=0, fz=0, mx=0, my=0, mz=0,
+                 nature="rotating"):
         """
         Apply a point load/moment at an axial location. Call again for
         each additional load point; loads accumulate.
+
+        Renamed from ``forces`` (a mutator should read as a verb, aligning
+        with :class:`~mecapy.beams.Beam`/:class:`~mecapy.beams.Beam3D`);
+        ``forces`` remains as a deprecated alias.
 
         Args:
             loc (float): Axial position, in mm (default: 0).
@@ -153,22 +342,44 @@ class Shaft(MechaElement):
             mx (float): Torque about x, N*mm (default: 0).
             my (float): Bending moment about y, N*mm (default: 0).
             mz (float): Bending moment about z, N*mm (default: 0).
+            nature (str): Time character of this load for fatigue
+                (default: "rotating"). "rotating" — a constant load whose
+                bending is fully reversed by shaft rotation (contributes to
+                the alternating stress); "static" — a steady load whose
+                bending is a mean stress (a non-rotating section). Ignored
+                by the static ``stress_profile``; only fatigue uses it.
 
         Returns:
             Shaft: self, so calls can be chained.
 
         Raises:
-            ValueError: If loc is outside [0, length].
+            ValueError: If loc is outside [0, length] or nature is unknown.
         """
         if not 0 <= loc <= self.length:
             raise ValueError(f"Load at loc={loc}mm is outside the shaft's length")
-        self._point_loads.append((loc, fx, fy, fz, mx, my, mz))
+        if nature not in ("rotating", "static"):
+            raise ValueError("nature must be 'rotating' or 'static'")
+        self._point_loads.append((loc, fx, fy, fz, mx, my, mz, nature))
         return self
 
-    def _build_beam(self, plane):
+    def forces(self, *args, **kwargs):
+        """Deprecated alias for :meth:`add_load`."""
+        import warnings
+        warnings.warn(
+            "Shaft.forces is deprecated; use add_load instead",
+            DeprecationWarning, stacklevel=2,
+        )
+        return self.add_load(*args, **kwargs)
+
+    def _build_beam(self, plane, natures=None):
         """Build a fresh mecapy.beams.Beam for one bending plane from the
         stored supports/loads — the only place that touches Beam's API, so
         Beam can change shape later without rippling through Shaft.
+
+        If ``natures`` (a set) is given, only loads whose ``nature`` is in
+        it are included — used to build the alternating- vs mean-stress
+        moment diagrams for fatigue. None includes every load (the static
+        stress_profile path).
 
         Positions are converted to exact sympy.Rational before reaching
         Beam/sympy: sympy's solve_for_reaction_loads silently breaks (an
@@ -180,9 +391,11 @@ class Shaft(MechaElement):
         beam = Beam(Rational(self.length), material=self.material, second_moment=self.second_moment)
         for location, kind in self._supports:
             beam.add_support(Rational(location), kind)
-        # row = (loc, fx, fy, fz, mx, my, mz); "y" plane uses fy+mz, "z" plane uses fz+my
+        # row = (loc, fx, fy, fz, mx, my, mz, nature); "y" uses fy+mz, "z" uses fz+my
         force_index, moment_index = (2, 6) if plane == "y" else (3, 5)
         for row in self._point_loads:
+            if natures is not None and row[7] not in natures:
+                continue
             loc = Rational(row[0])
             force, moment = row[force_index], row[moment_index]
             if force:
@@ -374,6 +587,57 @@ class Shaft(MechaElement):
             })
         peaks.sort(key=lambda p: p["x"])
         return {"x": xs, "nominal_stress": nominal, "peaks": peaks}
+
+    # ---- Fatigue (Shigley Ch. 7) ----
+
+    def _moment_resultant_at(self, pos, natures):
+        """float: Resultant bending moment (N*mm) at pos from loads whose
+        nature is in ``natures``, combining both planes (sqrt(Mz^2 + My^2)).
+        Zero when no load of that nature exists (no beam is solved)."""
+        if not any(row[7] in natures for row in self._point_loads):
+            return 0.0
+        mz = self._build_beam("y", natures).bending_moment()
+        my = self._build_beam("z", natures).bending_moment()
+        return math.hypot(float(mz.subs(_X, pos)), float(my.subs(_X, pos)))
+
+    def _alternating_loads_at(self, pos, torque_alt=0.0):
+        """tuple: (Ma, Ta) alternating bending moment and torque at pos.
+
+        Ma is the resultant bending from ``nature="rotating"`` loads (their
+        bending is fully reversed by rotation); Ta is ``torque_alt``.
+        """
+        return self._moment_resultant_at(pos, {"rotating"}), torque_alt
+
+    def _mean_loads_at(self, pos, torque_mean=0.0):
+        """tuple: (Mm, Tm) mean bending moment and torque at pos.
+
+        Mm is the resultant bending from ``nature="static"`` loads (steady,
+        non-rotating bending); Tm is ``torque_mean`` (the steady torque).
+        """
+        return self._moment_resultant_at(pos, {"static"}), torque_mean
+
+    def _fatigue_sections(self, torque, torque_alt, criterion):
+        """list: one dict per groove with its fatigue decomposition.
+
+        See :meth:`_ShaftFatigue.fatigue_analysis` for the returned keys;
+        also carries Ma/Mm/Ta/Tm/diameter/material for ``min_diameter_for``.
+        """
+        self._base_criterion(criterion)  # validate early
+        material = self._fatigue_material()
+        sections = []
+        for _n, (pos, gd, radii, _w), _kt_a, kt_b, kt_t in self.grooves:
+            Ma, Ta = self._alternating_loads_at(pos, torque_alt)
+            Mm, Tm = self._mean_loads_at(pos, torque)
+            kf = self._kf(kt_b, radii, "bending", material)
+            kfs = self._kf(kt_t, radii, "torsion", material)
+            nf, sa, sm = self._section_nf(gd, Ma, Mm, Ta, Tm, kf, kfs,
+                                          material, criterion)
+            sections.append({
+                "position": pos, "diameter": gd, "Ma": Ma, "Mm": Mm,
+                "Ta": Ta, "Tm": Tm, "kf": kf, "kfs": kfs, "nf": nf,
+                "sigma_a": sa, "sigma_m": sm, "material": material,
+            })
+        return sections
 
     # ---- Visualization ----
 

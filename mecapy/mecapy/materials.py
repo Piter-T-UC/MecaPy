@@ -123,10 +123,14 @@ class Material:
     equation Se = ka*kb*kc*ke*kf*Se' with Se' estimated from the
     temperature-corrected ultimate strength Sut_T = kd*Sut (steel
     correlation); temperature enters through Sut_T (which also drives ka,
-    f, sn_a, sn_b), not as a separate kd factor on Se. Cyclic load cases
-    are evaluated with the Goodman
-    criterion, accumulated with Miner's rule, and plotted on S-N (Woehler)
-    and Goodman diagrams.
+    f, sn_a, sn_b), not as a separate kd factor on Se. The S-N (Woehler)
+    and Goodman diagrams can be plotted, optionally annotated with a
+    component's cyclic load cases.
+
+    ``Material`` is stateless with respect to loading: it holds no load
+    cases. A component's cyclic spectrum and Miner accumulation live on the
+    component itself (see :class:`CyclicLoadCases`), so one ``Material``
+    instance can be shared across components without cross-contamination.
 
     Every Marin input (surface finish, loading, diameter, temperature,
     reliability, kf) and both strengths are settable; all derived quantities
@@ -156,15 +160,13 @@ class Material:
             Lumps stress concentration, corrosion, plating, residual
             stress and other effects not covered by ka..ke. Must be
             strictly positive.
-        q (list): Recorded notch-sensitivity entries for bending/axial
-            loading, each a ``{"radius": mm, "q": value}`` dict. Populated
-            by ``q_radius`` (which also returns the value it records).
-        q_shear (list): Recorded notch-sensitivity entries for torsion
-            loading, same ``{"radius", "q"}`` shape as ``q``.
-        kf_notch (list): Recorded fatigue stress-concentration results, each
-            a ``{"radius", "loading", "q", "kt", "kf"}`` dict. Populated by
-            ``fatigue_stress_concentration_factors`` from the recorded q.
         name (str): Optional identifier.
+
+    Notch sensitivity q (``notch_sensitivity``) and the fatigue
+    stress-concentration factor Kf (``fatigue_stress_concentration_factor``)
+    are pure functions of their arguments: they read the material's strength
+    but store nothing, so one ``Material`` instance can be shared by many
+    components without cross-contamination.
     """
 
     def __init__(self, base_material="steel", ultimate_strength=None,
@@ -235,10 +237,6 @@ class Material:
         self.temperature = temperature
         self.reliability = reliability
         self.kf = kf
-        self._q = []
-        self._q_shear = []
-        self._kf_notch = []
-        self._load_cases = []
 
     # ---- Settable primary inputs ----
 
@@ -393,7 +391,6 @@ class Material:
             )
         self._reliability = value
 
-    
     # ---- Marin factors and endurance limit (recomputed on access) ----
 
     @property
@@ -462,6 +459,7 @@ class Material:
         if self.reliability in RELIABILITY_FACTORS:
             return RELIABILITY_FACTORS[self.reliability]
         return 1 - 0.08 * NormalDist().inv_cdf(self.reliability)
+
     @property
     def kf(self):
         """float: Marin miscellaneous-effects factor."""
@@ -472,48 +470,6 @@ class Material:
         if value <= 0:
             raise ValueError("kf must be strictly positive")
         self._kf = value
-
-    @staticmethod
-    def _validate_q_records(value):
-        """list: Sanitized copy of a ``{radius, q}`` record list (or None)."""
-        if value is None:
-            return []
-        records = []
-        for entry in value:
-            radius, q_value = entry["radius"], entry["q"]
-            if radius <= 0:
-                raise ValueError("radius in a q record must be positive")
-            if not 0 <= q_value <= 1:
-                raise ValueError("q in a q record must be within [0, 1]")
-            records.append({"radius": radius, "q": q_value})
-        return records
-
-    @property
-    def q(self):
-        """list: Recorded ``{radius, q}`` entries for bending/axial loading.
-
-        Each ``q_radius`` call with bending/axial (or combined) loading
-        appends or updates the entry for its radius here. Returns a copy;
-        assign a list to replace, or ``None``/``[]`` to clear.
-        """
-        return [dict(entry) for entry in self._q]
-
-    @q.setter
-    def q(self, value):
-        self._q = self._validate_q_records(value)
-
-    @property
-    def q_shear(self):
-        """list: Recorded ``{radius, q}`` entries for torsion loading.
-
-        Populated by ``q_radius`` under torsion (or combined) loading, same
-        shape and semantics as ``q``.
-        """
-        return [dict(entry) for entry in self._q_shear]
-
-    @q_shear.setter
-    def q_shear(self, value):
-        self._q_shear = self._validate_q_records(value)
 
     @property
     def se_prime(self):
@@ -574,47 +530,29 @@ class Material:
         """
         return self._neuber_sqrt_a(self.loading)
 
-    def _record_q(self, records, radius, value):
-        """Append or update the ``{radius, q}`` entry for a radius in place."""
-        for entry in records:
-            if entry["radius"] == radius:
-                entry["q"] = value
-                return
-        records.append({"radius": radius, "q": value})
-
-    def _q_for(self, loading, radius):
-        """float: Neuber notch sensitivity for a loading, recorded on self.
-
-        Computes q = 1 / (1 + sqrt(a)/sqrt(r)) and stores the ``{radius, q}``
-        entry in ``q`` (bending/axial) or ``q_shear`` (torsion).
-        """
-        if radius <= 0:
-            raise ValueError("Notch radius must be strictly positive")
+    def _q_neuber(self, loading, radius):
+        """float: Neuber notch sensitivity q = 1/(1 + sqrt(a)/sqrt(r)), pure."""
         sqrt_a = self._neuber_sqrt_a(loading)
-        value = 1.0 / (1.0 + sqrt_a / math.sqrt(radius))
-        records = self._q_shear if loading == "torsion" else self._q
-        self._record_q(records, radius, value)
-        return value
+        return 1.0 / (1.0 + sqrt_a / math.sqrt(radius))
 
-    def q_radius(self, radius, loading=None):
+    def notch_sensitivity(self, radius, loading=None):
         """
         Notch sensitivity q for a notch radius (Neuber, Shigley Eq. 6-34).
 
-        Computes q = 1 / (1 + sqrt(a)/sqrt(r)), with sqrt(a) the Neuber
-        constant (steel curve fit, Eq. 6-35) and r the notch root radius,
-        then records the ``{radius, q}`` entry on the material: in ``q`` for
-        bending/axial loading, ``q_shear`` for torsion. For
-        ``loading="combined"`` both are computed and recorded, and the pair
-        is returned. q feeds ``fatigue_stress_concentration_factor``
+        Pure function: q = 1 / (1 + sqrt(a)/sqrt(r)), with sqrt(a) the Neuber
+        constant (steel curve fit, Eq. 6-35) and r the notch root radius. It
+        reads the material's strength but stores nothing, so calling it any
+        number of times leaves the ``Material`` unchanged. For
+        ``loading="combined"`` both curves are evaluated and returned as a
+        pair. q feeds ``fatigue_stress_concentration_factor``
         (Kf = 1 + q*(Kt - 1)).
 
         Args:
             radius (float): Notch root radius r in mm. Must be strictly
                 positive.
-            loading (str): Load type selecting the Neuber curve and the
-                record list (default: ``self.loading``). One of "bending",
-                "axial", "torsion", "combined"; bending and axial share the
-                same curve.
+            loading (str): Load type selecting the Neuber curve (default:
+                ``self.loading``). One of "bending", "axial", "torsion",
+                "combined"; bending and axial share the same curve.
 
         Returns:
             float: Notch sensitivity q in [0, 1] for a single loading, or a
@@ -622,14 +560,16 @@ class Material:
 
         Raises:
             ValueError: If ``radius`` is not strictly positive, or
-                ``loading`` has no notch curve (e.g. "combined" is handled,
-                but an unknown loading raises).
+                ``loading`` has no notch curve (an unknown loading raises;
+                "combined" is handled).
         """
+        if radius <= 0:
+            raise ValueError("Notch radius must be strictly positive")
         loading = self.loading if loading is None else loading
         if loading == "combined":
-            return (self._q_for("bending", radius),
-                    self._q_for("torsion", radius))
-        return self._q_for(loading, radius)
+            return (self._q_neuber("bending", radius),
+                    self._q_neuber("torsion", radius))
+        return self._q_neuber(loading, radius)
 
     @staticmethod
     def fatigue_stress_concentration_factor(kt, q=1.0):
@@ -638,8 +578,7 @@ class Material:
 
         Kf = 1 + q*(Kt - 1) (Shigley Eq. 6-32). q = 1.0 (the default) is the
         fully notch-sensitive, conservative case Kf = Kt; q = 0 gives Kf = 1
-        (no notch effect). Get a q value from ``q_radius`` (the ``q`` it
-        returns, or an entry of the ``q``/``q_shear`` record lists).
+        (no notch effect). Get a q value from ``notch_sensitivity``.
 
         Args:
             kt (float): Theoretical (geometric) stress-concentration factor
@@ -657,82 +596,6 @@ class Material:
         if not 0 <= q <= 1:
             raise ValueError("q (notch sensitivity) must be within [0, 1]")
         return 1.0 + q * (kt - 1.0)
-
-    @property
-    def kf_notch(self):
-        """list: Recorded fatigue stress-concentration results.
-
-        One ``{"radius", "loading", "q", "kt", "kf"}`` dict per
-        (radius, loading) evaluated by
-        ``fatigue_stress_concentration_factors``. Returns a copy.
-        """
-        return [dict(entry) for entry in self._kf_notch]
-
-    def _record_kf(self, radius, loading, q, kt, kf):
-        """Append or update the Kf record for a (radius, loading) in place."""
-        for entry in self._kf_notch:
-            if entry["radius"] == radius and entry["loading"] == loading:
-                entry.update(q=q, kt=kt, kf=kf)
-                return
-        self._kf_notch.append({"radius": radius, "loading": loading,
-                               "q": q, "kt": kt, "kf": kf})
-
-    def _q_records_for(self, loading):
-        """list: ``(loading, records)`` pairs of stored q lists for a loading.
-
-        bending/axial -> ``q``; torsion -> ``q_shear``; combined -> both.
-        """
-        if loading == "torsion":
-            return [("torsion", self._q_shear)]
-        if loading in ("bending", "axial"):
-            return [(loading, self._q)]
-        if loading == "combined":
-            return [("bending", self._q), ("torsion", self._q_shear)]
-        available = "bending, axial, torsion, combined"
-        raise ValueError(
-            f"Unknown loading {loading!r}. Available: {available}"
-        )
-
-    def fatigue_stress_concentration_factors(self, kt, loading=None):
-        """
-        Fatigue stress-concentration factor Kf for every recorded q value.
-
-        Applies Kf = 1 + q*(Kt - 1) (Shigley Eq. 6-32) to each notch
-        sensitivity already recorded by ``q_radius`` (``q`` for
-        bending/axial, ``q_shear`` for torsion), stores each result on the
-        material's ``kf_notch`` list, and returns the Kf values. Combined
-        loading uses both record lists (bending/axial entries first).
-
-        Args:
-            kt (float): Theoretical stress-concentration factor Kt applied
-                to every recorded q. Must be >= 1.
-            loading (str): Which recorded q list to use (default:
-                ``self.loading``). One of "bending", "axial", "torsion",
-                "combined".
-
-        Returns:
-            list: Kf values (floats), one per recorded q entry used, in
-            record order.
-
-        Raises:
-            ValueError: If ``kt`` < 1, ``loading`` is unknown, or no q
-                values have been recorded for the requested loading (call
-                ``q_radius`` first).
-        """
-        loading = self.loading if loading is None else loading
-        sources = self._q_records_for(loading)
-        results = []
-        for load_name, records in sources:
-            for entry in records:
-                kf = self.fatigue_stress_concentration_factor(kt, entry["q"])
-                self._record_kf(entry["radius"], load_name, entry["q"], kt, kf)
-                results.append(kf)
-        if not results:
-            raise ValueError(
-                f"No q values recorded for {loading!r} loading; "
-                "call q_radius(...) first"
-            )
-        return results
 
     # ---- S-N (Woehler) curve ----
 
@@ -978,7 +841,7 @@ class Material:
             return yielding, "yield"
         return fatigue, "fatigue"
 
-    # ---- Cyclic load cases, Miner's rule ----
+    # ---- Mean-stress helpers (pure; shared by cycles_to_failure) ----
 
     def _mean_strength(self, criterion):
         """float: Mean-axis intercept for a criterion (Sut or Sy), in MPa.
@@ -1014,154 +877,6 @@ class Material:
                 f"({name} = {limit} MPa) for the {criterion} criterion"
             )
 
-    def _find_load_case(self, index):
-        """Return the list position for an int index or str label."""
-        if isinstance(index, str):
-            for i, case in enumerate(self._load_cases):
-                if case["label"] == index:
-                    return i
-            raise ValueError(f"No load case with label {index!r}")
-        try:
-            self._load_cases[index]
-        except IndexError:
-            raise ValueError(
-                f"Load case index {index} out of range "
-                f"({len(self._load_cases)} cases)"
-            )
-        return index
-
-    @property
-    def load_cases(self):
-        """list: Copy of the registered load-case dicts."""
-        return [dict(case) for case in self._load_cases]
-
-    def add_load_case(self, stress_amplitude, mean_stress=0.0, cycles=1,
-                      label=None):
-        """
-        Register a cyclic load case for Goodman/Miner analysis.
-
-        Args:
-            stress_amplitude (float): Alternating stress sigma_a in MPa.
-                Must be strictly positive.
-            mean_stress (float): Mean stress sigma_m in MPa (default: 0).
-                Must be within [0, Sut).
-            cycles (float): Applied cycles n for Miner's rule (default: 1).
-                Must be strictly positive.
-            label (str): Optional label to edit/remove the case by name.
-
-        Returns:
-            Material: ``self``, so calls can be chained.
-
-        Raises:
-            ValueError: If any argument fails its validation above.
-        """
-        self._validate_cycle_stress(stress_amplitude, mean_stress)
-        if cycles <= 0:
-            raise ValueError("Cycles must be strictly positive")
-        self._load_cases.append({
-            "stress_amplitude": stress_amplitude,
-            "mean_stress": mean_stress,
-            "cycles": cycles,
-            "label": label,
-        })
-        return self
-
-    def edit_load_case(self, index, **kwargs):
-        """
-        Edit an existing load case, revalidating the result.
-
-        Args:
-            index (int or str): List position or label of the case.
-            **kwargs: Any of ``stress_amplitude``, ``mean_stress``,
-                ``cycles``, ``label``.
-
-        Returns:
-            Material: ``self``, so calls can be chained.
-
-        Raises:
-            ValueError: If the case is not found, an unknown field is
-                given, or the edited case fails validation.
-        """
-        i = self._find_load_case(index)
-        unknown = set(kwargs) - set(_LOAD_CASE_KEYS)
-        if unknown:
-            raise ValueError(
-                f"Unknown load case field(s): {', '.join(sorted(unknown))}. "
-                f"Available: {', '.join(_LOAD_CASE_KEYS)}"
-            )
-        merged = {**self._load_cases[i], **kwargs}
-        self._validate_cycle_stress(merged["stress_amplitude"],
-                                    merged["mean_stress"])
-        if merged["cycles"] <= 0:
-            raise ValueError("Cycles must be strictly positive")
-        self._load_cases[i] = merged
-        return self
-
-    def remove_load_case(self, index):
-        """
-        Remove a load case by list position or label.
-
-        Args:
-            index (int or str): List position or label of the case.
-
-        Returns:
-            Material: ``self``, so calls can be chained.
-
-        Raises:
-            ValueError: If the case is not found.
-        """
-        del self._load_cases[self._find_load_case(index)]
-        return self
-
-    def miner_damage(self, criterion="goodman"):
-        """
-        Cumulative fatigue damage per Miner's rule (Eq. 6-58).
-
-        D = sum(n_i / N_i) over the registered load cases; cases at or
-        below the endurance limit contribute 0. Failure is predicted at
-        D >= 1.
-
-        Args:
-            criterion (str): Mean-stress criterion used for each case's
-                cycles to failure (default: "goodman"). One of
-                ``_FATIGUE_CRITERIA``.
-
-        Returns:
-            float: Damage fraction for one pass through the load cases.
-
-        Raises:
-            ValueError: If ``criterion`` is unknown or a stored case is out
-                of range for it (e.g. sigma_m >= Sy under soderberg).
-        """
-        damage = 0.0
-        for case in self._load_cases:
-            n_failure = self.cycles_to_failure(case["stress_amplitude"],
-                                              case["mean_stress"], criterion)
-            if math.isfinite(n_failure):
-                damage += case["cycles"] / n_failure
-        return damage
-
-    def remaining_life(self, criterion="goodman"):
-        """
-        Repetitions of the whole load-case block until failure.
-
-        Args:
-            criterion (str): Mean-stress criterion (default: "goodman").
-                One of ``_FATIGUE_CRITERIA``.
-
-        Returns:
-            float: 1 / miner_damage(); ``math.inf`` if every case is
-            below the endurance limit (zero damage).
-
-        Raises:
-            ValueError: If ``criterion`` is unknown or a stored case is out
-                of range for it.
-        """
-        damage = self.miner_damage(criterion)
-        if damage == 0:
-            return math.inf
-        return 1 / damage
-
     # ---- Integration with MechaElement ----
 
     @property
@@ -1190,15 +905,18 @@ class Material:
             )
         return plt
 
-    def plot_sn_curve(self, show=True, ax=None):
+    def plot_sn_curve(self, load_cases=(), show=True, ax=None):
         """
-        Plot the S-N (Woehler) diagram with the registered load cases.
+        Plot the S-N (Woehler) diagram, optionally with load cases.
 
         Finite-life line S = a*N^b from 10^3 cycles down to the endurance
         limit, then the horizontal Se asymptote. Each finite-life load
-        case is marked at (N_i, sigma_ar_i).
+        case in ``load_cases`` is marked at (N_i, sigma_ar_i).
 
         Args:
+            load_cases (list): Optional load-case dicts (``stress_amplitude``,
+                ``mean_stress``, ``label``) to annotate — e.g. a component's
+                ``load_cases`` (default: none).
             show (bool): Call ``plt.show()`` (default: True).
             ax (matplotlib.axes.Axes): Optional axes to draw into.
 
@@ -1221,9 +939,9 @@ class Material:
         ax.loglog([n_knee, 10 * n_knee], [se, se], color="tab:blue",
                   linestyle="--", label=f"Se = {se:.0f} MPa")
 
-        for i, case in enumerate(self._load_cases):
+        for i, case in enumerate(load_cases):
             n_failure = self.cycles_to_failure(case["stress_amplitude"],
-                                              case["mean_stress"])
+                                               case["mean_stress"])
             if not math.isfinite(n_failure):
                 continue
             sigma_ar = self.sn_a * n_failure ** self.sn_b
@@ -1241,14 +959,17 @@ class Material:
             plt.show()
         return ax.figure
 
-    def plot_goodman(self, show=True, ax=None):
+    def plot_goodman(self, load_cases=(), show=True, ax=None):
         """
-        Plot the Goodman diagram with the registered load cases.
+        Plot the Goodman diagram, optionally with load cases.
 
         Modified Goodman line from (0, Se) to (Sut, 0), Langer yield line
-        from (0, Sy) to (Sy, 0), and each load case at (sigma_m, sigma_a).
+        from (0, Sy) to (Sy, 0), and each load case in ``load_cases`` at
+        (sigma_m, sigma_a).
 
         Args:
+            load_cases (list): Optional load-case dicts (``stress_amplitude``,
+                ``mean_stress``, ``label``) to annotate (default: none).
             show (bool): Call ``plt.show()`` (default: True).
             ax (matplotlib.axes.Axes): Optional axes to draw into.
 
@@ -1268,7 +989,7 @@ class Material:
         ax.plot([0, sy], [sy, 0], color="tab:orange", linestyle="--",
                 label="Langer (yield) line")
 
-        for i, case in enumerate(self._load_cases):
+        for i, case in enumerate(load_cases):
             label = case["label"] or f"case {i}"
             ax.plot(case["mean_stress"], case["stress_amplitude"], "o",
                     color="tab:red")
@@ -1294,3 +1015,199 @@ class Material:
             f"ultimate_strength={self.ultimate_strength}, "
             f"yield_strength={self.yield_strength})"
         )
+
+
+class CyclicLoadCases:
+    """Component-side cyclic load spectrum and Miner's-rule accumulation.
+
+    Mixed into a mechanical element (Shaft, Bolt, ...) that owns a material,
+    this holds the *component's* own cyclic load cases and evaluates
+    cumulative fatigue damage against the material's S-N curve (Shigley
+    Ch. 6). The spectrum belongs to the component, not the material: two
+    shafts of the same steel have different duty cycles, so the shared
+    :class:`Material` is never mutated by load-case bookkeeping.
+
+    The host must expose ``self.material`` (a database name or a
+    :class:`Material`); a bare name is wrapped in a default ``Material`` for
+    its S-N curve. Units: stresses in MPa, cycles dimensionless.
+    """
+
+    @property
+    def _cases(self):
+        """list: backing load-case list, created lazily on first access."""
+        if not hasattr(self, "_load_cases"):
+            self._load_cases = []
+        return self._load_cases
+
+    def _fatigue_material(self):
+        """Material: this component's material as a fatigue-capable Material.
+
+        A :class:`Material` is used as-is; a database name is wrapped in a
+        default (machined, kb = 1) ``Material``. Pass a configured
+        ``Material`` for a meaningful endurance limit.
+        """
+        if isinstance(self.material, Material):
+            return self.material
+        return Material(self.material)
+
+    @property
+    def load_cases(self):
+        """list: Copy of the registered load-case dicts."""
+        return [dict(case) for case in self._cases]
+
+    def _find_load_case(self, index):
+        """Return the list position for an int index or str label."""
+        cases = self._cases
+        if isinstance(index, str):
+            for i, case in enumerate(cases):
+                if case["label"] == index:
+                    return i
+            raise ValueError(f"No load case with label {index!r}")
+        try:
+            cases[index]
+        except IndexError:
+            raise ValueError(
+                f"Load case index {index} out of range ({len(cases)} cases)"
+            )
+        return index
+
+    def add_load_case(self, stress_amplitude, mean_stress=0.0, cycles=1,
+                      label=None):
+        """
+        Register a cyclic load case on this component for Miner analysis.
+
+        Args:
+            stress_amplitude (float): Alternating stress sigma_a in MPa.
+                Must be strictly positive.
+            mean_stress (float): Mean stress sigma_m in MPa (default: 0).
+                Must be within [0, Sut).
+            cycles (float): Applied cycles n for Miner's rule (default: 1).
+                Must be strictly positive.
+            label (str): Optional label to edit/remove the case by name.
+
+        Returns:
+            The component itself (``self``), so calls can be chained.
+
+        Raises:
+            ValueError: If any argument fails its validation above.
+        """
+        self._fatigue_material()._validate_cycle_stress(
+            stress_amplitude, mean_stress)
+        if cycles <= 0:
+            raise ValueError("Cycles must be strictly positive")
+        self._cases.append({
+            "stress_amplitude": stress_amplitude,
+            "mean_stress": mean_stress,
+            "cycles": cycles,
+            "label": label,
+        })
+        return self
+
+    def edit_load_case(self, index, **kwargs):
+        """
+        Edit an existing load case, revalidating the result.
+
+        Args:
+            index (int or str): List position or label of the case.
+            **kwargs: Any of ``stress_amplitude``, ``mean_stress``,
+                ``cycles``, ``label``.
+
+        Returns:
+            The component itself (``self``), so calls can be chained.
+
+        Raises:
+            ValueError: If the case is not found, an unknown field is
+                given, or the edited case fails validation.
+        """
+        i = self._find_load_case(index)
+        unknown = set(kwargs) - set(_LOAD_CASE_KEYS)
+        if unknown:
+            raise ValueError(
+                f"Unknown load case field(s): {', '.join(sorted(unknown))}. "
+                f"Available: {', '.join(_LOAD_CASE_KEYS)}"
+            )
+        merged = {**self._cases[i], **kwargs}
+        self._fatigue_material()._validate_cycle_stress(
+            merged["stress_amplitude"], merged["mean_stress"])
+        if merged["cycles"] <= 0:
+            raise ValueError("Cycles must be strictly positive")
+        self._cases[i] = merged
+        return self
+
+    def remove_load_case(self, index):
+        """
+        Remove a load case by list position or label.
+
+        Args:
+            index (int or str): List position or label of the case.
+
+        Returns:
+            The component itself (``self``), so calls can be chained.
+
+        Raises:
+            ValueError: If the case is not found.
+        """
+        del self._cases[self._find_load_case(index)]
+        return self
+
+    def miner_damage(self, criterion="goodman"):
+        """
+        Cumulative fatigue damage per Miner's rule (Eq. 6-58).
+
+        D = sum(n_i / N_i) over this component's load cases against its
+        material's S-N curve; cases at or below the endurance limit
+        contribute 0. Failure is predicted at D >= 1.
+
+        Args:
+            criterion (str): Mean-stress criterion used for each case's
+                cycles to failure (default: "goodman"). One of
+                ``_FATIGUE_CRITERIA``.
+
+        Returns:
+            float: Damage fraction for one pass through the load cases.
+
+        Raises:
+            ValueError: If ``criterion`` is unknown or a stored case is out
+                of range for it (e.g. sigma_m >= Sy under soderberg).
+        """
+        material = self._fatigue_material()
+        damage = 0.0
+        for case in self._cases:
+            n_failure = material.cycles_to_failure(
+                case["stress_amplitude"], case["mean_stress"], criterion)
+            if math.isfinite(n_failure):
+                damage += case["cycles"] / n_failure
+        return damage
+
+    def remaining_life(self, criterion="goodman"):
+        """
+        Repetitions of the whole load-case block until failure.
+
+        Args:
+            criterion (str): Mean-stress criterion (default: "goodman").
+                One of ``_FATIGUE_CRITERIA``.
+
+        Returns:
+            float: 1 / miner_damage(); ``math.inf`` if every case is below
+            the endurance limit (zero damage).
+
+        Raises:
+            ValueError: If ``criterion`` is unknown or a stored case is out
+                of range for it.
+        """
+        damage = self.miner_damage(criterion)
+        if damage == 0:
+            return math.inf
+        return 1 / damage
+
+    def plot_sn_curve(self, show=True, ax=None):
+        """Plot the material S-N diagram annotated with this component's
+        load cases (see :meth:`Material.plot_sn_curve`)."""
+        return self._fatigue_material().plot_sn_curve(
+            load_cases=self.load_cases, show=show, ax=ax)
+
+    def plot_goodman(self, show=True, ax=None):
+        """Plot the material Goodman diagram annotated with this component's
+        load cases (see :meth:`Material.plot_goodman`)."""
+        return self._fatigue_material().plot_goodman(
+            load_cases=self.load_cases, show=show, ax=ax)

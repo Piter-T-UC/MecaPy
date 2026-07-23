@@ -57,6 +57,24 @@ class TestCrossSection:
                                second_moment_z=3e-7, c_y=0.02, c_z=0.02)
         assert section.polar_moment == pytest.approx(4e-7)
 
+    def test_polar_moment_recomputes_from_second_moments(self):
+        """With no override, changing I_y updates polar_moment on next access."""
+        section = CrossSection(area=1e-3, second_moment_y=1e-7,
+                               second_moment_z=3e-7, c_y=0.02, c_z=0.02)
+        section.second_moment_y = 5e-7
+        assert section.polar_moment == pytest.approx(8e-7)
+
+    def test_polar_moment_override_is_respected_and_clearable(self):
+        """An explicit J override sticks; None reverts to the derived sum."""
+        section = CrossSection(area=1e-3, second_moment_y=1e-7,
+                               second_moment_z=3e-7, c_y=0.02, c_z=0.02)
+        section.polar_moment = 1e-6
+        assert section.polar_moment == pytest.approx(1e-6)
+        section.second_moment_y = 5e-7  # override ignores second-moment change
+        assert section.polar_moment == pytest.approx(1e-6)
+        section.polar_moment = None     # clear -> derived again
+        assert section.polar_moment == pytest.approx(8e-7)
+
     def test_non_numeric_input(self):
         """A non-numeric input raises ValueError."""
         with pytest.raises(ValueError):

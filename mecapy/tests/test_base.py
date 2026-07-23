@@ -29,7 +29,7 @@ class TestMechaElement:
             element.calculate_stress(1000, 0)
 
     def test_safety_factor(self):
-        """Safety factor is yield strength over applied stress."""
+        """Safety factor is yield strength over applied stress (ductile)."""
         element = MechaElement(material="steel")
         stress = 125e6  # half of steel's 250 MPa yield strength
         assert element.safety_factor(stress) == pytest.approx(2.0)
@@ -39,6 +39,30 @@ class TestMechaElement:
         element = MechaElement()
         with pytest.raises(ValueError):
             element.safety_factor(0)
+
+    def test_brittle_material_uses_ultimate_not_yield(self):
+        """A brittle material (cast iron) rates against Sut, not Sy."""
+        element = MechaElement(material="cast_iron")
+        stress = 125e6
+        # Coulomb-Mohr in tension reduces to Sut/sigma = 250/125 = 2.0,
+        # which differs from the ductile Sy/sigma = 180/125 = 1.44.
+        assert element.safety_factor(stress) == pytest.approx(250e6 / stress)
+        assert element.safety_factor(stress) != pytest.approx(180e6 / stress)
+
+    def test_brittle_material_compression_uses_suc(self):
+        """In compression a brittle material rates against Suc."""
+        element = MechaElement(material="cast_iron")
+        assert element.safety_factor(-100e6) == pytest.approx(820e6 / 100e6)
+
+    def test_brittle_flange_coupling_is_brittle_rated(self):
+        """FlangeCoupling (default cast iron) inherits the brittle criterion."""
+        from mecapy.couplings import FlangeCoupling
+
+        coupling = FlangeCoupling(shaft_diameter=40.0, bolt_circle_diameter=120.0,
+                                  n_bolts=4, bolt_diameter=12.0,
+                                  flange_thickness=15.0)
+        assert coupling.material == "cast_iron"
+        assert coupling.safety_factor(125e6) == pytest.approx(250e6 / 125e6)
 
 
 class TestInheritance:

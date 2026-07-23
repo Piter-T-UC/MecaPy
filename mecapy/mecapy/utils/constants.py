@@ -40,6 +40,12 @@ MATERIALS = {
         "poisson_ratio": 0.25,
         "yield_strength": 180e6,  # Pa
         "ultimate_strength": 250e6,  # Pa (gray iron, tensile)
+        # Gray iron is brittle: no true yield, and it is much stronger in
+        # compression. Suc ~ 3.3*Sut (ASTM class-30-like). The brittle flag
+        # routes MechaElement.safety_factor to the Coulomb-Mohr criterion
+        # (Sut/Suc) instead of the ductile Sy criterion.
+        "brittle": True,
+        "ultimate_compressive_strength": 820e6,  # Pa (magnitude)
         "shear_modulus": 64e9,  # Pa
         "specific_heat": 500,  # J/(kg*K)
     },

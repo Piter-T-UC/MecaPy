@@ -246,10 +246,12 @@ class WeldedUnion(MechaElement):
 
     def safety_factors(self, n=24):
         """
-        Safety factor of each weld against the AISC allowable.
+        Safety factor of each weld against the electrode throat allowable.
 
         Compares the weld's peak von Mises stress with the electrode
-        allowable ``0.30 * FEXX`` (Shigley Table 9-4).
+        allowable ``0.30 * FEXX`` (Shigley Table 9-4). This is the weld-metal
+        limit only; see :meth:`base_metal_safety_factors` for the adjacent
+        base-metal limit and :meth:`governing_safety_factors` for both.
 
         Args:
             n (int): Sample points per weld (>= 2).
@@ -263,6 +265,48 @@ class WeldedUnion(MechaElement):
             peak = entry["max_stress"]
             result[i] = w.allowable_stress / peak if peak > 0 else float("inf")
         return result
+
+    def base_metal_safety_factors(self, n=24):
+        """
+        Safety factor of each weld against the adjacent base-metal limit.
+
+        The group stresses are computed on the throat; the base metal shears
+        on the weld leg, so the base-metal stress is ``peak * throat/size``
+        (0.707 of the throat stress for a fillet). It is compared with the
+        base-metal allowable ``0.40 * Sy`` (Shigley Table 9-5/9-6).
+
+        Args:
+            n (int): Sample points per weld (>= 2).
+
+        Returns:
+            dict: ``{weld_index: safety_factor}``; an unloaded weld gets
+            ``float("inf")``.
+        """
+        result = {}
+        for i, (w, entry) in enumerate(zip(self.welds, self.weld_stresses(n))):
+            peak = entry["max_stress"]
+            base_stress = peak * w.base_metal_factor
+            result[i] = (w.base_metal_allowable / base_stress
+                         if base_stress > 0 else float("inf"))
+        return result
+
+    def governing_safety_factors(self, n=24):
+        """
+        Governing safety factor of each weld: min(weld metal, base metal).
+
+        A welded joint must satisfy both the electrode throat limit
+        (:meth:`safety_factors`) and the base-metal limit
+        (:meth:`base_metal_safety_factors`); the smaller governs.
+
+        Args:
+            n (int): Sample points per weld (>= 2).
+
+        Returns:
+            dict: ``{weld_index: safety_factor}``.
+        """
+        weld = self.safety_factors(n)
+        base = self.base_metal_safety_factors(n)
+        return {i: min(weld[i], base[i]) for i in weld}
 
     # ---- Sizing ----
 

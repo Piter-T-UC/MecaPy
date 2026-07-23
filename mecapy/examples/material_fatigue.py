@@ -82,21 +82,29 @@ def sn_curve_and_goodman(m):
 
 
 def load_cases_and_miner(m):
-    """Cyclic load cases: add / edit / remove, Miner's rule."""
+    """Cyclic load cases live on the COMPONENT, not the material.
+
+    A load spectrum belongs to the part under a duty cycle (two shafts of
+    the same steel have different spectra), so the CyclicLoadCases API sits
+    on the element. The material only supplies its S-N curve. Returns the
+    component so downstream steps (plots) can reuse it.
+    """
     print("Load Cases & Miner's Rule")
     print("=" * 40)
 
-    # Builder-style: add_load_case chains
-    m.add_load_case(350, mean_stress=0, cycles=5e3, label="startup") \
-     .add_load_case(250, mean_stress=50, cycles=5e5, label="cruise") \
-     .add_load_case(120, mean_stress=50, cycles=1e7, label="idle")
+    shaft = Shaft(diameter=25, length=500, material=m, name="input shaft")
+
+    # Builder-style: add_load_case chains on the component
+    shaft.add_load_case(350, mean_stress=0, cycles=5e3, label="startup") \
+         .add_load_case(250, mean_stress=50, cycles=5e5, label="cruise") \
+         .add_load_case(120, mean_stress=50, cycles=1e7, label="idle")
 
     # Edit by label (revalidates), remove by label or index
-    m.edit_load_case("cruise", cycles=1e5)
-    m.add_load_case(500, cycles=10, label="oops")
-    m.remove_load_case("oops")
+    shaft.edit_load_case("cruise", cycles=1e5)
+    shaft.add_load_case(500, cycles=10, label="oops")
+    shaft.remove_load_case("oops")
 
-    for case in m.load_cases:
+    for case in shaft.load_cases:
         n = m.cycles_to_failure(case["stress_amplitude"], case["mean_stress"])
         sf = m.goodman_safety_factor(case["stress_amplitude"],
                                      case["mean_stress"])
@@ -105,10 +113,11 @@ def load_cases_and_miner(m):
               f"sigma_m={case['mean_stress']:5.0f} n={case['cycles']:.1e} "
               f"-> N={life}, Goodman SF={sf:.2f}")
 
-    damage = m.miner_damage()
+    damage = shaft.miner_damage()
     print(f"Miner damage per block:  D = {damage:.4f}")
-    print(f"Blocks to failure:       {m.remaining_life():,.1f}")
+    print(f"Blocks to failure:       {shaft.remaining_life():,.1f}")
     print()
+    return shaft
 
 
 def element_integration(m):
@@ -129,13 +138,17 @@ def element_integration(m):
     print()
 
 
-def plots(m):
-    """Save the Woehler and Goodman diagrams (requires matplotlib)."""
+def plots(component):
+    """Save the Woehler and Goodman diagrams (requires matplotlib).
+
+    Called with the component (a Shaft) so the diagrams are annotated with
+    its load cases; the diagram lines themselves come from the material.
+    """
     print("Plots")
     print("=" * 40)
     try:
-        fig_sn = m.plot_sn_curve(show=False)
-        fig_goodman = m.plot_goodman(show=False)
+        fig_sn = component.plot_sn_curve(show=False)
+        fig_goodman = component.plot_goodman(show=False)
     except ImportError as exc:
         print(f"skipped: {exc}")
         return
@@ -148,6 +161,6 @@ if __name__ == "__main__":
     material = basics_and_marin()
     design_iteration(material)
     sn_curve_and_goodman(material)
-    load_cases_and_miner(material)
+    component = load_cases_and_miner(material)
     element_integration(material)
-    plots(material)
+    plots(component)

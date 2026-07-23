@@ -1,8 +1,12 @@
 """Standalone beam calculation helper functions.
 
-These are convenience functions for quick, closed-form calculations. For a
-full model with supports and loads, use :class:`mecapy.beams.Beam`, which is
-backed by SymPy.
+Low-level, single-formula helpers for quick closed-form checks — they are
+NOT the public beam API and do not duplicate it silently: for anything with
+supports, multiple loads or a full shear/moment/deflection solve, use
+:class:`mecapy.beams.Beam` / :class:`mecapy.beams.Beam3D` (SymPy-backed).
+Reach for these only when a single textbook formula (cantilever end
+deflection, M*c/I, V/A) is all you need and building a ``Beam`` would be
+overkill. SI units throughout (N, m, Pa, m^4).
 """
 
 

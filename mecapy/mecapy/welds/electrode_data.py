@@ -24,6 +24,11 @@ ELECTRODES = {
 # tensile strength (Shigley Table 9-4): tau_allow = 0.30 * S_ut.
 AISC_SHEAR_ALLOWABLE_FACTOR = 0.30
 
+# AISC allowable shear on the BASE METAL adjacent to the weld as a fraction
+# of the base-metal yield strength (Shigley Table 9-5/9-6): the joint must
+# satisfy this second limit as well as the electrode throat limit above.
+BASE_METAL_SHEAR_ALLOWABLE_FACTOR = 0.40
+
 
 def get_electrode(name):
     """

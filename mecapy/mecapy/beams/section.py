@@ -27,10 +27,14 @@ class CrossSection:
             m^4 (resists bending from z-direction loads). Settable.
         second_moment_z (float): Second moment of area about z, I_z, in
             m^4 (resists bending from y-direction loads). Settable.
-        polar_moment (float): Polar second moment of area J in m^4.
-            Defaults to ``I_y + I_z`` (perpendicular-axis theorem) at
-            construction; settable afterwards for sections whose torsion
-            constant differs (e.g. rectangles).
+        polar_moment (float): Torsion constant used as J in m^4. Derived —
+            defaults to the polar second moment ``I_y + I_z``
+            (perpendicular-axis theorem) and recomputes from I_y/I_z on
+            every access. For a non-circular section the true St-Venant
+            torsion constant J differs from the polar moment; assign a value
+            to override the default with the real J (e.g. Roark's J for a
+            rectangle, as :meth:`rectangular` does). Assign ``None`` to drop
+            the override and return to the derived polar moment.
         c_y (float): Outer-fiber distance from the neutral axis in the
             y direction, in m. Settable.
         c_z (float): Outer-fiber distance from the neutral axis in the
@@ -54,10 +58,10 @@ class CrossSection:
         Raises:
             ValueError: If any input is not a strictly positive number.
         """
+        self._polar_override = None
         self.area = area
         self.second_moment_y = second_moment_y
         self.second_moment_z = second_moment_z
-        self.polar_moment = second_moment_y + second_moment_z
         self.c_y = c_y
         self.c_z = c_z
 
@@ -101,12 +105,22 @@ class CrossSection:
 
     @property
     def polar_moment(self):
-        """float: Polar second moment of area J in m^4."""
-        return self._polar_moment
+        """float: Torsion constant J in m^4.
+
+        The explicit override if one was set, else the derived polar second
+        moment ``I_y + I_z`` (recomputed from the current I_y/I_z).
+        """
+        if self._polar_override is not None:
+            return self._polar_override
+        return self.second_moment_y + self.second_moment_z
 
     @polar_moment.setter
     def polar_moment(self, value):
-        self._polar_moment = self._positive_float(value, "polar_moment")
+        # None clears the override, reverting to the derived I_y + I_z.
+        if value is None:
+            self._polar_override = None
+        else:
+            self._polar_override = self._positive_float(value, "polar_moment")
 
     @property
     def c_y(self):
