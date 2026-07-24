@@ -32,6 +32,8 @@ from . import bearings
 from . import bolts
 from . import welds
 from . import shafts
+from . import columns
+from . import joints
 from . import clutches
 from . import brakes
 from . import couplings
@@ -52,6 +54,8 @@ __all__ = [
     "bolts",
     "welds",
     "shafts",
+    "columns",
+    "joints",
     "clutches",
     "brakes",
     "couplings",

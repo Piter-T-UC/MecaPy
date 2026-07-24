@@ -13,6 +13,7 @@ is the standard axial-plane approximation.
 import math
 
 from ..base import MechaElement
+from ..columns import Column
 from .power_screw_data import get_thread_form
 
 DEFAULT_MU = 0.15         # thread friction coefficient (steel on steel, greasy)
@@ -391,6 +392,24 @@ class PowerScrew(MechaElement):
         """float: Elastic modulus of the screw material in MPa."""
         return self.material_properties["elastic_modulus"] / 1e6
 
+    def buckling_column(self, end_condition=1.0):
+        """
+        The screw root modelled as a :class:`~mecapy.columns.Column`.
+
+        Builds a solid-circular column on the root (minor) diameter, so
+        the buckling checks (Euler/Johnson slenderness and loads) are
+        shared with the general column element rather than duplicated.
+
+        Args:
+            end_condition (float): Effective-length factor K (default 1.0).
+
+        Returns:
+            Column: The equivalent root-section column.
+        """
+        return Column.circular(self.minor_diameter, self.length,
+                               end_condition=end_condition,
+                               material=self.material)
+
     def slenderness_ratio(self, end_condition=1.0):
         """
         Column slenderness ratio Le / k of the screw.
@@ -405,8 +424,7 @@ class PowerScrew(MechaElement):
         Returns:
             float: Slenderness ratio (dimensionless).
         """
-        radius_gyration = self.minor_diameter / 4
-        return end_condition * self.length / radius_gyration
+        return self.buckling_column(end_condition).slenderness_ratio
 
     def johnson_transition_ratio(self):
         """
@@ -419,8 +437,7 @@ class PowerScrew(MechaElement):
         Returns:
             float: Transition slenderness ratio (dimensionless).
         """
-        sy = self.material_properties["yield_strength"] / 1e6
-        return math.sqrt(2 * math.pi ** 2 * self.elastic_modulus / sy)
+        return self.buckling_column().transition_slenderness
 
     def critical_buckling_load(self, end_condition=1.0):
         """
@@ -437,8 +454,7 @@ class PowerScrew(MechaElement):
         Returns:
             float: Critical load in N.
         """
-        le = end_condition * self.length
-        return math.pi ** 2 * self.elastic_modulus * self.second_moment / le ** 2
+        return self.buckling_column(end_condition).euler_load
 
     def check_buckling(self, force, end_condition=1.0):
         """
@@ -456,7 +472,7 @@ class PowerScrew(MechaElement):
         """
         if force == 0:
             raise ValueError("Force must be non-zero to compute a buckling factor")
-        return self.critical_buckling_load(end_condition) / abs(force)
+        return self.buckling_column(end_condition).euler_safety_factor(abs(force))
 
     def screw_safety_factor(self, force, torque):
         """

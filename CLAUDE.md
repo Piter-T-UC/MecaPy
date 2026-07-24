@@ -76,7 +76,9 @@ stress/safety-factor calculations:
 MechaElement                              # material_properties, calculate_stress(F, A), safety_factor(stress)
 ├── Beam (beams/)                         # SymPy-backed: reactions, shear, moment, deflection
 ├── Shaft (shafts/)                       # + torsional_stress()
-│   └── PowerScrew (shafts/power_screw.py)  # lead screw: thread stresses, buckling, efficiency
+│   └── PowerScrew (shafts/power_screw.py)  # lead screw: thread stresses, buckling (composes Column), efficiency
+├── Column (columns/)                     # Euler/Johnson strut buckling, secant formula (Shigley Ch. 4)
+├── Key / Pin / Rivet (joints/)           # torque/shear connections: shear+bearing checks (Shigley Ch. 7-8)
 ├── Gear (gears/)                         # base gear geometry; see gear type hierarchy below
 ├── Wheel (wheels/)                       # pulleys, sprockets; + moment_of_inertia, kinetic_energy
 │   └── Flywheel (wheels/flywheel.py)     # energy fluctuation sizing, rotating-disc stresses (SI)
@@ -426,7 +428,7 @@ Transmission (transmission.py) — orchestrates meshes
 #### Rating Strategies
 
 **AGMA 2101-D04** (Cylindrical gears only: Spur, Helical, Herringbone, pinion-on-rack)
-- Files: `agma.py`, `agma_data.py`, `agma_factors.py`
+- Files: `agma.py`, `agma_data.py`
 - Two equations:
   - **Bending:** Lewis stress with geometry factor J, K factors (load, life, reliability)
   - **Pitting:** Hertzian contact stress with surface finish, hardness factors
