@@ -4,6 +4,7 @@ from mecapy.gears import (
     HelicalGear,
     PlanetaryGearSet,
     SpurGear,
+    Transmission,
     Worm,
     WormWheel,
 )
@@ -23,6 +24,38 @@ def rate_helical_pair():
     print()
 
 
+def rate_two_stage_train():
+    """AGMA rating of every stage of a compound reducer.
+
+    The train propagates its own speeds and powers, so each mesh is
+    rated at its own operating point. Stage 1 runs coarser gearing, so
+    it gets its own quality number via ``stage_kwargs``.
+    """
+    pinion = SpurGear(17, module=3.0, face_width=55.0,
+                      power_kw=10.0, speed_rpm=1200.0)
+    mid_in = SpurGear(51, module=3.0, face_width=55.0)
+    mid_out = SpurGear(18, module=4.0, face_width=70.0)
+    output = SpurGear(54, module=4.0, face_width=70.0)
+
+    train = (Transmission(name="two-stage reducer")
+             .add_stage(pinion, mid_in, efficiency=0.98)
+             .add_stage(mid_out, output, efficiency=0.98))
+
+    # Stage 1 is the coarser, slower set, so it gets its own Qv.
+    rating_inputs = dict(Qv=8, Ko=1.25, hardness_HB=380,
+                         stage_kwargs=[None, {"Qv": 6}])
+
+    print(train.agma_summary(**rating_inputs))
+    print()
+
+    governing = train.agma_governing(**rating_inputs)
+    print(f"Weakest stage in bending: {governing['SF_stage']} "
+          f"(SF = {governing['SF']:.2f})")
+    print(f"Weakest stage in pitting: {governing['SH_stage']} "
+          f"(SH = {governing['SH']:.2f})")
+    print()
+
+
 def planetary_reducer():
     """Kinematics of a 3-planet epicyclic reducer."""
     ps = PlanetaryGearSet(sun=SpurGear(24, module=2.0),
@@ -38,7 +71,7 @@ def planetary_reducer():
     print(f"Ratio (carrier fixed, sun -> ring): "
           f"{ps.ratio('sun', 'ring', 'carrier'):.2f}")
     speeds = ps.speeds("sun", 3500.0, "ring")
-    print(f"Speeds for sun at 3500 rpm, ring fixed:")
+    print("Speeds for sun at 3500 rpm, ring fixed:")
     for member, rpm in speeds.items():
         print(f"  {member}: {rpm:.1f} rpm")
     print()
@@ -62,5 +95,6 @@ def worm_drive():
 
 if __name__ == "__main__":
     rate_helical_pair()
+    rate_two_stage_train()
     planetary_reducer()
     worm_drive()

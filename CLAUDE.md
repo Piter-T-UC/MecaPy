@@ -172,6 +172,11 @@ through `mecapy/materials.py` (`get_material_properties`, `get_available_materia
   - Single source of truth for mesh compatibility (`_check_mesh()`)
   - Kinematic model: speed ratios, output torque/power
   - Reused by AGMA rating and other pair methods
+  - Train-level AGMA: `rate_agma(stage_kwargs=None, **kwargs)` returns one
+    `AGMARating` per cylindrical stage (each tagged with `stage_index`, rated at
+    its own propagated speed/power); `agma_governing()` gives the worst SF/SH and
+    which stage they come from, `agma_summary()` prints the whole train.
+    Bevel/worm stages are skipped and listed by `agma_unrated_stages`.
 - **AGMA Rating** (`agma.py` + `agma_data.py`) — fatigue & contact stress
   - Implements AGMA 2101-D04 (metric) for cylindrical gears
   - Bending stress (Lewis + geometry factor) and pitting (Hertzian contact)

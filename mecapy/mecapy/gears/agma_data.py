@@ -181,6 +181,20 @@ CMA_COEFFICIENTS = {
 }
 
 # ----------------------------------------------------------------------
+# Size factor Ks by module — stepped metric table.
+# (upper module bound of the band, Ks). A tooth larger than the band's
+# bound falls into the next band; the last value covers everything above.
+# ----------------------------------------------------------------------
+
+SIZE_FACTOR_BY_MODULE = (
+    (5.0, 1.00),
+    (6.0, 1.05),
+    (8.0, 1.15),
+    (12.0, 1.25),
+    (20.0, 1.40),
+)
+
+# ----------------------------------------------------------------------
 # Reliability factor YZ (KR) — Shigley Table 14-10.
 # ----------------------------------------------------------------------
 

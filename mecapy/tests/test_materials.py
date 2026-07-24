@@ -236,6 +236,23 @@ class TestMarinFactors:
         with pytest.raises(ValueError):
             Material("steel", kf=0)
 
+    def test_describe_marin_factors_text(self):
+        """The report names every Marin factor, strength and S-N term."""
+        m = Material("steel", name="Alloy A", diameter=25)
+        text = m.describe_marin_factors()
+        assert "Alloy A" in text
+        for label in ("Sut", "Sut_T", "Sy", "ka", "kb", "kc", "kd", "ke",
+                      "kf", "Se'", "Se", "f", "S-N coefficient",
+                      "S-N exponent"):
+            assert label in text
+
+    def test_describe_marin_factors_values(self):
+        """Reported ka/Se match the underlying properties."""
+        m = Material("steel", diameter=25)
+        text = m.describe_marin_factors()
+        assert f"{m.ka:.4f}" in text
+        assert f"{m.endurance_limit:.3f}" in text
+
 
 class TestNotchSensitivity:
     """Test cases for the Neuber notch sensitivity factor q."""
