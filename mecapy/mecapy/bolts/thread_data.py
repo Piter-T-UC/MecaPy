@@ -1,9 +1,15 @@
-"""ISO metric thread and bolt property-class data.
+"""Thread and bolt property-class data (metric and imperial).
 
 Tabulated values for ISO metric coarse threads (ISO 262 / ISO 724) and
-bolt property classes (ISO 898-1), plus Shigley's closed-form thread
-geometry for threads not in the table (fine series, custom pitches).
-Units: mm for dimensions, mm^2 for areas, MPa for strengths.
+bolt property classes (ISO 898-1), for Unified inch threads (ASME B1.1,
+UNC and UNF series) and SAE J429 grades, plus Shigley's closed-form
+thread geometry for threads not in either table (fine series, custom
+pitches).
+
+Units: mm for dimensions, mm^2 for areas, MPa for strengths -- imperial
+data is converted once, here in the table, so every consumer downstream
+stays metric. The original US customary value is kept in a comment next
+to each converted one.
 """
 
 from math import pi
@@ -36,6 +42,73 @@ ISO_COARSE_THREADS = {
     "M36": {"nominal_diameter": 36.0, "pitch": 4.0, "stress_area": 817.0},
 }
 
+# Unified inch threads (ASME B1.1), coarse (UNC) and fine (UNF) series,
+# from Shigley Table 8-2. Designation is "<size>-<threads per inch>", e.g.
+# "1/2-13". Stored in mm and mm^2: d = in * 25.4, p = 25.4 / tpi and
+# At = in^2 * 645.16; the tabulated inch value is in the trailing comment.
+# Only the fractional sizes 1/4 to 1-1/2 are tabulated -- the range SAE
+# J429 grades cover. Numbered machine-screw sizes (#0 to #12) and the
+# constant-pitch 8-UN / 12-UN series are reachable through the explicit
+# diameter+pitch route of :class:`~mecapy.bolts.bolt.Bolt`.
+UNIFIED_THREADS = {
+    "1/4-20": {"nominal_diameter": 6.350, "pitch": 1.2700,
+               "stress_area": 20.52, "series": "UNC"},  # 0.0318 in^2
+    "1/4-28": {"nominal_diameter": 6.350, "pitch": 0.9071,
+               "stress_area": 23.48, "series": "UNF"},  # 0.0364 in^2
+    "5/16-18": {"nominal_diameter": 7.9375, "pitch": 1.4111,
+                "stress_area": 33.81, "series": "UNC"},  # 0.0524 in^2
+    "5/16-24": {"nominal_diameter": 7.9375, "pitch": 1.0583,
+                "stress_area": 37.42, "series": "UNF"},  # 0.0580 in^2
+    "3/8-16": {"nominal_diameter": 9.525, "pitch": 1.5875,
+               "stress_area": 50.00, "series": "UNC"},  # 0.0775 in^2
+    "3/8-24": {"nominal_diameter": 9.525, "pitch": 1.0583,
+               "stress_area": 56.65, "series": "UNF"},  # 0.0878 in^2
+    "7/16-14": {"nominal_diameter": 11.1125, "pitch": 1.8143,
+                "stress_area": 68.58, "series": "UNC"},  # 0.1063 in^2
+    "7/16-20": {"nominal_diameter": 11.1125, "pitch": 1.2700,
+                "stress_area": 76.58, "series": "UNF"},  # 0.1187 in^2
+    "1/2-13": {"nominal_diameter": 12.700, "pitch": 1.9538,
+               "stress_area": 91.55, "series": "UNC"},  # 0.1419 in^2
+    "1/2-20": {"nominal_diameter": 12.700, "pitch": 1.2700,
+               "stress_area": 103.16, "series": "UNF"},  # 0.1599 in^2
+    "9/16-12": {"nominal_diameter": 14.2875, "pitch": 2.1167,
+                "stress_area": 117.42, "series": "UNC"},  # 0.182 in^2
+    "9/16-18": {"nominal_diameter": 14.2875, "pitch": 1.4111,
+                "stress_area": 130.97, "series": "UNF"},  # 0.203 in^2
+    "5/8-11": {"nominal_diameter": 15.875, "pitch": 2.3091,
+               "stress_area": 145.81, "series": "UNC"},  # 0.226 in^2
+    "5/8-18": {"nominal_diameter": 15.875, "pitch": 1.4111,
+               "stress_area": 165.16, "series": "UNF"},  # 0.256 in^2
+    "3/4-10": {"nominal_diameter": 19.050, "pitch": 2.5400,
+               "stress_area": 215.48, "series": "UNC"},  # 0.334 in^2
+    "3/4-16": {"nominal_diameter": 19.050, "pitch": 1.5875,
+               "stress_area": 240.64, "series": "UNF"},  # 0.373 in^2
+    "7/8-9": {"nominal_diameter": 22.225, "pitch": 2.8222,
+              "stress_area": 298.06, "series": "UNC"},  # 0.462 in^2
+    "7/8-14": {"nominal_diameter": 22.225, "pitch": 1.8143,
+               "stress_area": 328.39, "series": "UNF"},  # 0.509 in^2
+    "1-8": {"nominal_diameter": 25.400, "pitch": 3.1750,
+            "stress_area": 390.97, "series": "UNC"},  # 0.606 in^2
+    "1-12": {"nominal_diameter": 25.400, "pitch": 2.1167,
+             "stress_area": 427.74, "series": "UNF"},  # 0.663 in^2
+    "1-1/8-7": {"nominal_diameter": 28.575, "pitch": 3.6286,
+                "stress_area": 492.26, "series": "UNC"},  # 0.763 in^2
+    "1-1/8-12": {"nominal_diameter": 28.575, "pitch": 2.1167,
+                 "stress_area": 552.26, "series": "UNF"},  # 0.856 in^2
+    "1-1/4-7": {"nominal_diameter": 31.750, "pitch": 3.6286,
+                "stress_area": 625.16, "series": "UNC"},  # 0.969 in^2
+    "1-1/4-12": {"nominal_diameter": 31.750, "pitch": 2.1167,
+                 "stress_area": 692.26, "series": "UNF"},  # 1.073 in^2
+    "1-3/8-6": {"nominal_diameter": 34.925, "pitch": 4.2333,
+                "stress_area": 745.16, "series": "UNC"},  # 1.155 in^2
+    "1-3/8-12": {"nominal_diameter": 34.925, "pitch": 2.1167,
+                 "stress_area": 848.39, "series": "UNF"},  # 1.315 in^2
+    "1-1/2-6": {"nominal_diameter": 38.100, "pitch": 4.2333,
+                "stress_area": 906.45, "series": "UNC"},  # 1.405 in^2
+    "1-1/2-12": {"nominal_diameter": 38.100, "pitch": 2.1167,
+                 "stress_area": 1020.00, "series": "UNF"},  # 1.581 in^2
+}
+
 # Bolt property classes per ISO 898-1. Strengths in MPa.
 PROPERTY_CLASSES = {
     "4.6": {"tensile_strength": 400.0, "yield_strength": 240.0, "proof_strength": 225.0},
@@ -47,30 +120,98 @@ PROPERTY_CLASSES = {
     "12.9": {"tensile_strength": 1200.0, "yield_strength": 1080.0, "proof_strength": 970.0},
 }
 
+# SAE J429 grades for Unified inch bolts (Shigley Table 8-9). Strengths in
+# MPa (ksi * 6.894757; the tabulated ksi values are in the comments).
+# Grades 2 and 5 are size dependent, so each grade is a list of
+# ``(max nominal diameter in mm, strengths)`` rows in ascending diameter
+# order; :func:`get_property_class` picks the first row that covers the
+# bolt's diameter. Grade 4 (studs only) is not tabulated.
+SAE_GRADES = {
+    "1": [  # 1/4 to 1 1/2 in: Sp 33, Sut 60, Sy 36 ksi
+        (38.1, {"tensile_strength": 413.7, "yield_strength": 248.2, "proof_strength": 227.5}),
+    ],
+    "2": [  # up to 3/4 in: 55/74/57 ksi -- above 3/4 in: 33/60/36 ksi
+        (19.05, {"tensile_strength": 510.2, "yield_strength": 393.0, "proof_strength": 379.2}),
+        (38.1, {"tensile_strength": 413.7, "yield_strength": 248.2, "proof_strength": 227.5}),
+    ],
+    "5": [  # up to 1 in: 85/120/92 ksi -- above 1 in: 74/105/81 ksi
+        (25.4, {"tensile_strength": 827.4, "yield_strength": 634.3, "proof_strength": 586.1}),
+        (38.1, {"tensile_strength": 723.9, "yield_strength": 558.5, "proof_strength": 510.2}),
+    ],
+    "5.2": [  # 1/4 to 1 in: Sp 85, Sut 120, Sy 92 ksi
+        (25.4, {"tensile_strength": 827.4, "yield_strength": 634.3, "proof_strength": 586.1}),
+    ],
+    "7": [  # 1/4 to 1 1/2 in: Sp 105, Sut 133, Sy 115 ksi
+        (38.1, {"tensile_strength": 916.9, "yield_strength": 792.9, "proof_strength": 723.9}),
+    ],
+    "8": [  # 1/4 to 1 1/2 in: Sp 120, Sut 150, Sy 130 ksi
+        (38.1, {"tensile_strength": 1034.2, "yield_strength": 896.3, "proof_strength": 827.4}),
+    ],
+    "8.2": [  # 1/4 to 1 in: Sp 120, Sut 150, Sy 130 ksi
+        (25.4, {"tensile_strength": 1034.2, "yield_strength": 896.3, "proof_strength": 827.4}),
+    ],
+}
 
-def get_thread(size):
+
+def normalize_thread_size(size):
     """
-    Look up ISO coarse thread data for a thread designation.
+    Canonicalize a thread designation to its table key.
+
+    Strips surrounding whitespace and an optional trailing Unified series
+    suffix, so "1/2-13 UNC" and "1/2-13" both canonicalize to "1/2-13".
 
     Args:
-        size (str): Thread designation, e.g. "M10".
+        size (str): Thread designation, e.g. "M10" or "1/2-13 UNC".
 
     Returns:
-        dict: ``nominal_diameter`` (mm), ``pitch`` (mm) and
-        ``stress_area`` (mm^2) for the given size.
+        str: The key under which the thread is tabulated.
 
     Raises:
         ValueError: If ``size`` is not a known thread designation.
     """
-    if size not in ISO_COARSE_THREADS:
-        available = ", ".join(ISO_COARSE_THREADS.keys())
-        raise ValueError(f"Unknown thread size {size!r}. Available sizes: {available}")
-    return ISO_COARSE_THREADS[size]
+    if size in ISO_COARSE_THREADS:
+        return size
+    key = str(size).strip()
+    if key.upper().endswith(("UNC", "UNF")):
+        key = key[:-3].strip()
+    if key in UNIFIED_THREADS:
+        return key
+    available = ", ".join(list(ISO_COARSE_THREADS) + list(UNIFIED_THREADS))
+    raise ValueError(f"Unknown thread size {size!r}. Available sizes: {available}")
+
+
+def get_thread(size):
+    """
+    Look up tabulated thread data for a thread designation.
+
+    Searches the ISO metric coarse table first, then the Unified inch
+    table. A trailing series suffix is optional, so "1/2-13 UNC" and
+    "1/2-13" resolve to the same thread.
+
+    Args:
+        size (str): Thread designation, e.g. "M10" or "1/2-13".
+
+    Returns:
+        dict: ``nominal_diameter`` (mm), ``pitch`` (mm) and
+        ``stress_area`` (mm^2) for the given size; Unified threads also
+        carry ``series`` ("UNC" or "UNF").
+
+    Raises:
+        ValueError: If ``size`` is not a known thread designation.
+    """
+    key = normalize_thread_size(size)
+    if key in ISO_COARSE_THREADS:
+        return ISO_COARSE_THREADS[key]
+    return UNIFIED_THREADS[key]
 
 
 def get_pitch(size):
     """
     Look up the ISO coarse thread pitch for a size or nominal diameter.
+
+    Metric only: the numeric-diameter lookup scans the ISO coarse table,
+    where nominal diameters are unambiguous. Use :func:`get_thread` with a
+    full designation (e.g. "1/2-13") for Unified inch threads.
 
     Args:
         size (str or float): Thread designation (e.g. "M10") or nominal
@@ -139,23 +280,45 @@ def shigley_thread_geometry(diameter, pitch):
     }
 
 
-def get_property_class(property_class):
+def get_property_class(property_class, diameter=None):
     """
-    Look up strength data for a bolt property class.
+    Look up strength data for a bolt property class or SAE grade.
+
+    ISO 898-1 property classes are size independent, so ``diameter`` is
+    ignored for them. SAE J429 grades 2 and 5 are derated above a
+    threshold diameter; for those, the row covering ``diameter`` is
+    returned. When ``diameter`` is omitted the weakest (largest-size) row
+    is returned, so a caller that does not know the size can never
+    overstate the strength.
 
     Args:
-        property_class (str): Property class designation, e.g. "8.8".
+        property_class (str): ISO 898-1 property class (e.g. "8.8") or
+            SAE J429 grade (e.g. "5").
+        diameter (float): Nominal bolt diameter in mm, used to pick the
+            right row of a size-dependent SAE grade. Optional.
 
     Returns:
         dict: ``tensile_strength``, ``yield_strength`` and
         ``proof_strength`` in MPa.
 
     Raises:
-        ValueError: If ``property_class`` is not a known class.
+        ValueError: If ``property_class`` is not a known class or grade,
+            or if ``diameter`` exceeds the largest size the grade covers.
     """
-    if property_class not in PROPERTY_CLASSES:
-        available = ", ".join(PROPERTY_CLASSES.keys())
+    if property_class in PROPERTY_CLASSES:
+        return PROPERTY_CLASSES[property_class]
+    if property_class in SAE_GRADES:
+        rows = SAE_GRADES[property_class]
+        if diameter is None:
+            return rows[-1][1]
+        for max_diameter, strengths in rows:
+            if diameter <= max_diameter:
+                return strengths
         raise ValueError(
-            f"Unknown property class {property_class!r}. Available classes: {available}"
+            f"SAE grade {property_class!r} is not defined for a nominal diameter of "
+            f"{diameter} mm (largest tabulated size: {rows[-1][0]} mm)"
         )
-    return PROPERTY_CLASSES[property_class]
+    available = ", ".join(list(PROPERTY_CLASSES) + list(SAE_GRADES))
+    raise ValueError(
+        f"Unknown property class {property_class!r}. Available classes: {available}"
+    )

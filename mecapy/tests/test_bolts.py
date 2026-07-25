@@ -622,6 +622,138 @@ class TestBoltMutableInputs:
             bolt.stress_area_method = "table"  # no table size backing it
 
 
+class TestImperialBolt:
+    """Unified inch threads (UNC/UNF) and SAE J429 grades on the same Bolt."""
+
+    def test_unc_geometry_from_table(self):
+        """1/2-13 UNC reproduces Shigley Table 8-2 in mm."""
+        bolt = Bolt(size="1/2-13", length=50.0, property_class="5")
+        assert bolt.thread_series == "UNC"
+        assert isclose(bolt.nominal_diameter, 12.7)
+        assert isclose(bolt.threads_per_inch, 13.0, rel_tol=1e-3)
+        assert isclose(bolt.stress_area, 91.55)  # 0.1419 in^2
+        assert isclose(bolt.pitch, 25.4 / 13, rel_tol=1e-4)
+
+    def test_unc_proof_load_matches_shigley(self):
+        """1/2-13 grade 5 proof load is Shigley's 12.06 kip = 53.6 kN.
+
+        The end-to-end check on the in->mm conversion chain:
+        0.1419 in^2 * 85 ksi = 12.06 kip = 53.65 kN.
+        """
+        bolt = Bolt(size="1/2-13", length=50.0, property_class="5")
+        assert isclose(bolt.proof_load, 53.65e3, rel_tol=2e-3)
+
+    def test_series_suffix_is_optional(self):
+        """'1/2-13 UNC' canonicalizes to '1/2-13'; -20 is the UNF thread."""
+        assert Bolt(size="1/2-13 UNC", length=50.0).size == "1/2-13"
+        assert Bolt(size="1/2-13 unc", length=50.0).stress_area == 91.55
+        fine = Bolt(size="1/2-20", length=50.0, property_class="8")
+        assert fine.thread_series == "UNF"
+        assert fine.stress_area == 103.16  # 0.1599 in^2
+        assert fine.nominal_diameter == Bolt(size="1/2-13", length=50.0).nominal_diameter
+
+    def test_sae_grade_is_size_dependent(self):
+        """SAE grade 2 derates above 3/4 in: 55 ksi -> 33 ksi proof."""
+        small = Bolt(size="3/4-10", length=50.0, property_class="2")
+        large = Bolt(size="1-8", length=50.0, property_class="2")
+        assert isclose(small.proof_strength, 379.2)  # 55 ksi
+        assert isclose(large.proof_strength, 227.5)  # 33 ksi
+        # grade 5 switches above 1 in instead
+        assert isclose(Bolt(size="1-8", length=50.0, property_class="5").proof_strength,
+                       586.1)
+        assert isclose(Bolt(size="1-1/8-7", length=50.0, property_class="5").proof_strength,
+                       510.2)
+
+    def test_changing_size_recomputes_sae_strength(self):
+        """Growing past the grade threshold drops the strength (no caching)."""
+        bolt = Bolt(size="3/4-10", length=50.0, property_class="2")
+        assert isclose(bolt.proof_strength, 379.2)
+        bolt.size = "1-8"
+        assert isclose(bolt.proof_strength, 227.5)
+        assert bolt.proof_load == pytest.approx(bolt.proof_strength * bolt.stress_area)
+
+    def test_grade_not_defined_for_size(self):
+        """A grade that stops at 1 in rejects a larger bolt."""
+        bolt = Bolt(size="1-1/4-7", length=60.0, property_class="8.2")
+        with pytest.raises(ValueError):
+            bolt.proof_strength
+
+    def test_metric_bolts_are_unaffected(self):
+        """ISO sizes and classes keep their previous behaviour."""
+        bolt = Bolt(size="M10", length=50.0, property_class="8.8")
+        assert bolt.thread_series == "ISO metric"
+        assert bolt.stress_area == 58.0
+        assert bolt.proof_strength == 580.0
+        assert Bolt(length=50.0, diameter=10.0, pitch=1.5).thread_series == "custom"
+
+    def test_unknown_designation_and_grade(self):
+        """Unknown Unified sizes and SAE grades raise ValueError."""
+        with pytest.raises(ValueError):
+            Bolt(size="1/2-99", length=50.0)
+        with pytest.raises(ValueError):
+            Bolt(size="1/2-13", length=50.0, property_class="99")
+
+    def test_minimum_bolt_stays_in_the_same_series(self):
+        """Sizing an imperial union returns Unified sizes, not M-sizes.
+
+        V = 2000 N/bolt, mu = 0.2 -> Fi >= 10000 N ->
+        At >= 10000/(0.75*586.1) = 22.75 mm^2 -> 5/16-18 (33.81;
+        1/4-20 = 20.52 fails).
+        """
+        union = BoltedUnion(Bolt("1/2-13", 50.0), square_pattern(),
+                            forces=(8000.0, 0.0, 0.0))
+        unc = union.minimum_bolt(mu=0.2, property_class="5")
+        assert unc.thread_series == "UNC"
+        assert unc.size == "5/16-18"
+        fine = BoltedUnion(Bolt("1/2-20", 50.0), square_pattern(),
+                           forces=(8000.0, 0.0, 0.0))
+        assert fine.minimum_bolt(mu=0.2, property_class="5").thread_series == "UNF"
+        # metric unions are unchanged
+        metric = BoltedUnion(Bolt("M10", 50.0), square_pattern(),
+                             forces=(8000.0, 0.0, 0.0))
+        assert metric.minimum_bolt(mu=0.2).size == "M8"
+
+
+class TestPintInputs:
+    """Optional pint quantities at the Bolt boundary (plain floats unchanged)."""
+
+    def test_length_accepts_a_quantity(self):
+        """length=2 in behaves exactly like length=50.8 mm."""
+        pytest.importorskip("pint")
+        from mecapy.utils.units import ureg
+
+        quantity = Bolt(size="1/2-13", length=2 * ureg.inch)
+        plain = Bolt(size="1/2-13", length=50.8)
+        assert quantity.length == pytest.approx(plain.length)
+        assert quantity.stiffness == pytest.approx(plain.stiffness)
+
+    def test_custom_diameter_and_pitch_accept_quantities(self):
+        """An inch diameter/pitch pair lands on the same geometry as mm."""
+        pytest.importorskip("pint")
+        from mecapy.utils.units import ureg
+
+        quantity = Bolt(length=50.0, diameter=0.5 * ureg.inch,
+                        pitch=ureg.inch / 13)
+        plain = Bolt(length=50.0, diameter=12.7, pitch=25.4 / 13)
+        assert quantity.stress_area == pytest.approx(plain.stress_area)
+
+    def test_wrong_dimension_is_rejected(self):
+        """A force where a length belongs raises pint's DimensionalityError."""
+        pint = pytest.importorskip("pint")
+        from mecapy.utils.units import ureg
+
+        with pytest.raises(pint.DimensionalityError):
+            Bolt(size="M10", length=5 * ureg.newton)
+
+    def test_plain_floats_still_validate(self):
+        """The pint boundary does not weaken the positivity check."""
+        with pytest.raises(ValueError):
+            Bolt(size="M10", length=-5.0)
+        bolt = Bolt(size="M10", length=50.0)
+        with pytest.raises(ValueError):
+            bolt.length = 0.0
+
+
 class TestBoltedUnionFatigue:
     """Bolted-joint fatigue (Phase 7.1, Shigley Ch. 8)."""
 

@@ -12,16 +12,42 @@ Load convention (right-handed axes, z out of the joint plane):
     - All loads act at the centroid of the bolt group.
 """
 
-from math import copysign, log, pi, radians, sqrt, tan
+from math import copysign, cos, log, pi, radians, sin, sqrt, tan
 
 from ..base import MechaElement
 from ..materials import get_material_properties
 from .bolt import Bolt
-from .thread_data import ISO_COARSE_THREADS, get_property_class
+from .thread_data import ISO_COARSE_THREADS, UNIFIED_THREADS, get_property_class
 
 # Default interface friction coefficient (dry steel on steel), matching
 # the convention in mecapy.shafts.power_screw.
 DEFAULT_MU = 0.3
+
+
+def circular_pattern(n_bolts, radius):
+    """
+    Build a circular bolt pattern, evenly spaced starting at angle 0.
+
+    Args:
+        n_bolts (int): Number of bolts around the circle.
+        radius (float): Pattern radius in mm.
+
+    Returns:
+        list: ``[bolt_number, x, y]`` rows (mm) suitable for
+        :class:`BoltedUnion`'s ``positions``, numbered 1..n_bolts.
+
+    Raises:
+        ValueError: If ``n_bolts`` is not a strictly positive integer or
+            ``radius`` is not strictly positive.
+    """
+    if n_bolts <= 0:
+        raise ValueError("n_bolts must be strictly positive")
+    if radius <= 0:
+        raise ValueError("radius must be strictly positive")
+    return [
+        [i + 1, radius * cos(2 * pi * i / n_bolts), radius * sin(2 * pi * i / n_bolts)]
+        for i in range(n_bolts)
+    ]
 
 
 class BoltedUnion(MechaElement):
@@ -758,7 +784,11 @@ class BoltedUnion(MechaElement):
 
     def minimum_bolt(self, mu=DEFAULT_MU, property_class="8.8", safety_factor=1.0):
         """
-        Find the smallest ISO coarse bolt that supports the union loads.
+        Find the smallest table bolt that supports the union loads.
+
+        Candidates are drawn from the same thread family as the current
+        bolt: the ISO coarse table for a metric (or custom) bolt, and the
+        matching Unified series (UNC or UNF) for an imperial one.
         Models a slip-critical joint: shear is carried entirely by
         friction at the clamped interface, with the reusable-joint
         preload Fi = 0.75 * Sp * At (``recommended_preload``). Each
@@ -778,9 +808,9 @@ class BoltedUnion(MechaElement):
 
         Args:
             mu (float): Interface friction coefficient (default: 0.15).
-            property_class (str): ISO 898-1 class of the candidate bolts
-                (default: "8.8"). Pass None to fall back to the current
-                bolt's class instead.
+            property_class (str): ISO 898-1 class or SAE J429 grade of the
+                candidate bolts (default: "8.8"). Pass None to fall back
+                to the current bolt's class instead.
             safety_factor (float): Design factor for the three checks
                 (default: 1.0).
 
@@ -790,22 +820,33 @@ class BoltedUnion(MechaElement):
 
         Raises:
             ValueError: If the inputs are invalid, the union carries no
-                load, or no ISO coarse size up to M36 passes.
+                load, or no size in the candidate table passes.
         """
         if mu <= 0:
             raise ValueError("Friction coefficient must be strictly positive")
         if safety_factor <= 0:
             raise ValueError("Safety factor must be strictly positive")
         pc = property_class if property_class is not None else self.bolt.property_class
-        sp = get_property_class(pc)["proof_strength"]
+        get_property_class(pc)  # validate the class/grade up front
         demands = self._sizing_demands()
         n = safety_factor
-        sizes = sorted(ISO_COARSE_THREADS, key=lambda s: ISO_COARSE_THREADS[s]["stress_area"])
+        series = self.bolt.thread_series
+        if series in ("UNC", "UNF"):
+            table = {s: d for s, d in UNIFIED_THREADS.items() if d["series"] == series}
+        else:
+            table = ISO_COARSE_THREADS
+        sizes = sorted(table, key=lambda s: table[s]["stress_area"])
         for size in sizes:
             candidate = Bolt(size, length=self.bolt.length, property_class=pc,
                              material=self.bolt.material)
-            fi = candidate.recommended_preload
             at = candidate.stress_area
+            # Sp is size dependent for SAE grades 2 and 5, so resolve per
+            # candidate; a grade may not cover the largest sizes at all.
+            try:
+                sp = candidate.proof_strength
+            except ValueError:
+                continue
+            fi = candidate.recommended_preload
             if self.plates is not None:
                 c_bolt = c_clamp = self._joint_constant_for(candidate)
             else:
@@ -821,7 +862,7 @@ class BoltedUnion(MechaElement):
             if ok:
                 return candidate
         raise ValueError(
-            f"No ISO coarse bolt up to M36 satisfies the load with mu={mu}, "
+            f"No bolt up to {sizes[-1]} satisfies the load with mu={mu}, "
             f"property class {pc} and safety factor {safety_factor}"
         )
 

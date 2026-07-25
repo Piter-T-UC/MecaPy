@@ -37,9 +37,13 @@ setup(
             "black>=22.0",
             "flake8>=4.0",
             "mypy>=0.950",
+            "pint>=0.20",
         ],
         "viz": [
             "matplotlib>=3.5.0",
+        ],
+        "units": [
+            "pint>=0.20",
         ],
     },
     classifiers=[
