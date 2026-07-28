@@ -1430,17 +1430,17 @@ class BoltedUnion(MechaElement):
                 "axial": entry["axial"],
             }
             if has_members:
-                state = clamps[number]
+                state = clamps[number]  # type: ignore
                 row.update({
                     "bolt_tension": state["bolt_tension"],
                     "member_force": state["member_force"],
                     "clamp": state["clamp"],
                     "separated": state["separated"],
                     "washer_safety_factor": state["washer_safety_factor"],
-                    "separation": separation[number],
-                    "proof": proof[number],
-                    "bearing": bearing[number],
-                    "edge_distance": edges[number]["edge_distance"],
+                    "separation": separation[number],  # type: ignore
+                    "proof": proof[number],  # type: ignore
+                    "bearing": bearing[number],  # type: ignore
+                    "edge_distance": edges[number]["edge_distance"],  # type: ignore
                 })
             report["bolts"][number] = row
         return report
