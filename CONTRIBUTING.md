@@ -100,6 +100,9 @@ mypy mecapy/
 
 ## Development Setup
 
+All commands below are run from the `mecapy/` subdirectory of the repository,
+which is where the Python project lives (`cd mecapy` after cloning).
+
 1. Clone the repository
 2. Create a virtual environment:
    ```bash

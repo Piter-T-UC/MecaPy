@@ -47,6 +47,23 @@ class TestBeam:
         assert location == 5
         assert moment == 2500  # 1000 * 10 / 4
 
+    def test_float_support_location_reactions(self):
+        """Non-integer support locations solve (SymPy sympifies the name)."""
+        beam = Beam(length=5, elastic_modulus=210e9, second_moment=8e-6)
+        beam.add_support(0, "pin").add_support(3.5, "roller")
+        beam.add_point_load(-1000, 2)
+        values = sorted(float(v) for v in beam.reactions.values())
+        # Statics: R_0 = 1000*(3.5-2)/3.5, R_3.5 = 1000*2/3.5
+        assert values == pytest.approx([1000 * 1.5 / 3.5, 1000 * 2 / 3.5])
+
+    def test_float_fixed_support_location_reactions(self):
+        """A fixed support at a float location yields force and moment."""
+        beam = Beam(length=2.5, elastic_modulus=210e9, second_moment=8e-6)
+        beam.add_support(0.0, "fixed")
+        beam.add_point_load(-500, 2.5)
+        values = sorted(float(v) for v in beam.reactions.values())
+        assert values == pytest.approx([-500 * 2.5, 500.0])
+
     def test_cantilever_reactions(self):
         """A cantilever carries the full load and reacting moment."""
         E, I = symbols("E I", positive=True)

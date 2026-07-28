@@ -31,18 +31,21 @@ MecaPy provides tools for analyzing and designing various mechanical components:
 
 ### From Source
 
-The Python project lives in the `MecaPy/` subdirectory of the repository:
+The Python project lives in the `mecapy/` subdirectory of the repository.
+All development commands are run from there:
 
 ```bash
 git clone https://github.com/piter-t-uc/mecapy.git
-cd mecapy/MecaPy
+cd mecapy/mecapy
 pip install -e .
 ```
 
 ### With Development Dependencies
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev]"          # pytest, coverage, black, flake8, mypy
+pip install -e ".[dev,viz]"      # + matplotlib, for the plot_* methods
+pip install -e ".[docs]"         # sphinx, for building the documentation
 ```
 
 ## Architecture

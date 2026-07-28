@@ -24,6 +24,7 @@ from .thread_data import (
     get_thread,
     normalize_thread_size,
     shigley_thread_geometry,
+    threaded_length,
 )
 
 
@@ -302,13 +303,78 @@ class Bolt(CyclicLoadCases, MechaElement):
 
     @property
     def stiffness(self):
-        """float: Axial stiffness k = As * E / L in N/mm.
+        """float: Free-length axial stiffness k = As * E / L in N/mm.
 
-        Simple single-area model: the tensile stress area is assumed
-        over the full length, which is conservative (a segmented
-        shank/thread model would give a slightly stiffer bolt).
+        Single-area model of the bolt on its own: the tensile stress
+        area is assumed over the whole length. This is the spring
+        behind :meth:`elongation`, and it is deliberately *not* the
+        stiffness used in joint analysis -- a bolt in a grip is stiffer,
+        because part of the grip is unthreaded shank. See
+        :meth:`segmented_stiffness` and
+        :attr:`mecapy.bolts.BoltedUnion.bolt_stiffness`.
         """
         return self.stress_area * self.elastic_modulus / self.length
+
+    @property
+    def threaded_length(self):
+        """float: Threaded length LT in mm (Shigley Table 8-7).
+
+        LT = 2*d + 6 mm for lengths up to 125 mm, +12 mm up to 200 mm
+        and +25 mm beyond; Unified threads use the inch column of the
+        same table. Not capped at :attr:`length`: a bolt shorter than
+        its own LT is fully threaded, i.e. :attr:`shank_length` is 0.
+        """
+        return threaded_length(self.nominal_diameter, self.length, self.thread_series)
+
+    @property
+    def shank_length(self):
+        """float: Unthreaded shank length ld = L - LT in mm, floored at 0."""
+        return max(self.length - self.threaded_length, 0.0)
+
+    def segmented_stiffness(self, grip):
+        """
+        Axial stiffness of the bolt in a grip (Shigley Eq. 8-17).
+
+        The bolt in a joint is two springs in series: the unthreaded
+        shank (nominal area Ad over ld) and the threaded portion
+        (stress area At over lt), giving::
+
+            kb = Ad*At*E / (Ad*lt + At*ld)
+
+        with ld the shank length inside the grip and lt = grip - ld the
+        threaded length inside it (Shigley Eqs. 8-13/8-14). Both
+        degenerate cases are meaningful rather than errors: a shank
+        running past the grip gives a fully unthreaded grip
+        (kb = Ad*E/grip), and a bolt threaded to the head gives
+        kb = At*E/grip. This is always stiffer than the free-length
+        :attr:`stiffness`.
+
+        Args:
+            grip (float): Grip length in mm (or a pint.Quantity length).
+
+        Returns:
+            float: Bolt stiffness kb in N/mm.
+
+        Raises:
+            ValueError: If ``grip`` is not strictly positive or exceeds
+                the bolt length.
+        """
+        grip = to_magnitude(grip, "mm")
+        if grip <= 0:
+            raise ValueError("Grip must be strictly positive")
+        if grip > self.length:
+            raise ValueError(
+                f"Grip {grip} mm exceeds the bolt length {self.length} mm"
+            )
+        area_shank = self.nominal_area
+        area_thread = self.stress_area
+        ld = min(self.shank_length, grip)
+        lt = grip - ld
+        modulus = self.elastic_modulus
+        return (
+            area_shank * area_thread * modulus
+            / (area_shank * lt + area_thread * ld)
+        )
 
     def elongation(self, force):
         """

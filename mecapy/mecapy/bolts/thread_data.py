@@ -152,6 +152,63 @@ SAE_GRADES = {
     ],
 }
 
+# Shigley Table 8-7: threaded length LT of a standard hex-head cap screw,
+# as ``(max bolt length, addend)`` rows in ascending length order. The
+# threaded length is LT = 2*d + addend, so the first row whose max length
+# covers the bolt gives the rule. Metric rows are mm; the Unified rows are
+# the same table's inch column converted (1/4 in and 1/2 in).
+METRIC_THREADED_LENGTH_RULE = ((125.0, 6.0), (200.0, 12.0), (float("inf"), 25.0))
+UNIFIED_THREADED_LENGTH_RULE = ((152.4, 6.35), (float("inf"), 12.7))
+
+# Shigley Table 8-7 tabulates metric threaded lengths up to this diameter.
+MAX_METRIC_THREADED_LENGTH_DIAMETER = 48.0
+
+
+def threaded_length(diameter, length, series="ISO metric"):
+    """
+    Threaded length LT of a standard hex-head cap screw (Shigley Table 8-7).
+
+    Metric: LT = 2*d + 6 mm for L <= 125 mm, 2*d + 12 mm for
+    125 < L <= 200 mm, and 2*d + 25 mm beyond that. Unified: LT = 2*d +
+    1/4 in for L <= 6 in, else 2*d + 1/2 in.
+
+    The result is not capped at ``length``: a bolt shorter than its own
+    LT is fully threaded, which callers detect as ``LT >= length``. See
+    :meth:`mecapy.bolts.Bolt.segmented_stiffness`.
+
+    Args:
+        diameter (float): Nominal bolt diameter d in mm.
+        length (float): Bolt length L in mm.
+        series (str): Thread series, as reported by
+            :attr:`mecapy.bolts.Bolt.thread_series`. "UNC" and "UNF"
+            select the Unified rule; anything else uses the metric rule.
+
+    Returns:
+        float: Threaded length LT in mm.
+
+    Raises:
+        ValueError: If ``diameter`` or ``length`` is not strictly
+            positive, or if a metric diameter exceeds the 48 mm covered
+            by Table 8-7.
+    """
+    if diameter <= 0:
+        raise ValueError("Nominal diameter must be strictly positive")
+    if length <= 0:
+        raise ValueError("Bolt length must be strictly positive")
+    if series in ("UNC", "UNF"):
+        rule = UNIFIED_THREADED_LENGTH_RULE
+    else:
+        if diameter > MAX_METRIC_THREADED_LENGTH_DIAMETER:
+            raise ValueError(
+                f"Shigley Table 8-7 covers nominal diameters up to "
+                f"{MAX_METRIC_THREADED_LENGTH_DIAMETER} mm; got {diameter} mm"
+            )
+        rule = METRIC_THREADED_LENGTH_RULE
+    for max_length, addend in rule:
+        if length <= max_length:
+            return 2.0 * diameter + addend
+    raise AssertionError("unreachable: the last rule row covers every length")
+
 
 def normalize_thread_size(size):
     """
