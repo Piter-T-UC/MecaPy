@@ -403,6 +403,67 @@ class TestBevelGear:
         stress = pinion.lewis_bending_stress(500.0, gear)
         assert stress > 0
 
+    def test_negative_face_width_raises(self):
+        """A non-positive face width is rejected."""
+        with pytest.raises(ValueError):
+            BevelGear(teeth=16, module=3.0, face_width=-1.0)
+
+    def test_cone_distance_and_mean_radius(self):
+        """Cone distance A0 = d/(2 sin gamma); mean radius needs a face width."""
+        pinion = BevelGear(teeth=16, module=3.0, face_width=12.0)
+        gear = BevelGear(teeth=32, module=3.0)
+        gamma = math.atan(0.5)
+        assert pinion.cone_distance_with(gear) == pytest.approx(
+            pinion.pitch_diameter / (2 * math.sin(gamma)))
+        assert pinion.mean_radius_with(gear) == pytest.approx(
+            pinion.pitch_diameter / 2 - 6.0 * math.sin(gamma))
+
+    def test_mean_radius_requires_face_width(self):
+        """mean_radius_with needs the face width set."""
+        pinion = BevelGear(teeth=16, module=3.0)
+        gear = BevelGear(teeth=32, module=3.0)
+        with pytest.raises(ValueError):
+            pinion.mean_radius_with(gear)
+
+    def test_bad_shaft_angle_raises(self):
+        """Shaft angle must be in (0, 180)."""
+        pinion = BevelGear(teeth=16, module=3.0)
+        gear = BevelGear(teeth=32, module=3.0)
+        with pytest.raises(ValueError):
+            pinion.pitch_cone_angle_with(gear, shaft_angle=200.0)
+
+    def test_lewis_requires_face_width(self):
+        """The bending check needs the face width."""
+        pinion = BevelGear(teeth=16, module=3.0)
+        gear = BevelGear(teeth=32, module=3.0)
+        with pytest.raises(ValueError):
+            pinion.lewis_bending_stress(500.0, gear)
+
+    def test_lewis_face_width_over_third_raises(self):
+        """Face width above A0/3 is rejected (standard bevel practice)."""
+        pinion = BevelGear(teeth=16, module=3.0, face_width=40.0)
+        gear = BevelGear(teeth=32, module=3.0)
+        with pytest.raises(ValueError):
+            pinion.lewis_bending_stress(500.0, gear)
+
+    def test_force_report_validation(self):
+        """Non-positive power or speed raises."""
+        pinion = BevelGear(teeth=16, module=3.0, face_width=12.0)
+        gear = BevelGear(teeth=32, module=3.0)
+        with pytest.raises(ValueError):
+            pinion.force_report(power_kw=0.0, speed_rpm=1200.0, mate=gear)
+        with pytest.raises(ValueError):
+            pinion.force_report(power_kw=5.0, speed_rpm=0.0, mate=gear)
+
+    def test_describe_forces_and_repr(self):
+        """describe_forces is a formatted report; repr names the class."""
+        pinion = BevelGear(teeth=16, module=3.0, face_width=12.0, name="pin")
+        gear = BevelGear(teeth=32, module=3.0)
+        text = pinion.describe_forces(power_kw=5.0, speed_rpm=1200.0, mate=gear)
+        assert "axial force (Fa)" in text
+        assert "pin" in text
+        assert pinion.__repr__().startswith("BevelGear(")
+
 
 class TestWorm:
     """Test cases for worm drives."""
@@ -437,6 +498,91 @@ class TestWorm:
         wheel = WormWheel(teeth=40, module=4.0)
         assert wheel.material == "bronze"
 
+    @pytest.mark.parametrize("kwargs", [
+        {"starts": 0, "module": 4.0, "pitch_diameter": 50.0},
+        {"starts": 1.5, "module": 4.0, "pitch_diameter": 50.0},
+        {"starts": 2, "module": None, "pitch_diameter": 50.0},
+        {"starts": 2, "module": -1.0, "pitch_diameter": 50.0},
+        {"starts": 2, "module": 4.0, "pitch_diameter": None},
+        {"starts": 2, "module": 4.0, "pitch_diameter": 0.0},
+        {"starts": 2, "module": 4.0, "pitch_diameter": 50.0, "pressure_angle": 50.0},
+    ])
+    def test_worm_invalid_inputs_raise(self, kwargs):
+        """Constructor validates starts, module, pitch diameter, angle."""
+        with pytest.raises(ValueError):
+            Worm(**kwargs)
+
+    def test_center_distance(self):
+        """Center distance is the mean of the two pitch diameters."""
+        worm = Worm(starts=2, module=4.0, pitch_diameter=50.0)
+        wheel = WormWheel(teeth=40, module=4.0)
+        assert worm.center_distance_with(wheel) == pytest.approx(
+            (50.0 + wheel.pitch_diameter) / 2)
+
+    def test_efficiency_negative_friction_raises(self):
+        """Negative friction is rejected."""
+        worm = Worm(starts=2, module=4.0, pitch_diameter=50.0)
+        with pytest.raises(ValueError):
+            worm.efficiency(-0.1)
+
+    def test_permissible_load(self):
+        """Buckingham wear load W = K * d_wheel * b."""
+        from mecapy.gears.agma_data import WORM_WEAR_K
+        worm = Worm(starts=2, module=4.0, pitch_diameter=50.0)
+        wheel = WormWheel(teeth=40, module=4.0, face_width=30.0)
+        k = WORM_WEAR_K["bronze_chilled"]
+        assert worm.permissible_load(wheel) == pytest.approx(
+            k * wheel.pitch_diameter * 30.0)
+
+    def test_permissible_load_requires_face_width(self):
+        """Wear check needs the wheel face width."""
+        worm = Worm(starts=2, module=4.0, pitch_diameter=50.0)
+        wheel = WormWheel(teeth=40, module=4.0)
+        with pytest.raises(ValueError):
+            worm.permissible_load(wheel)
+
+    def test_permissible_load_bad_material_key(self):
+        """An unknown wear-factor key raises."""
+        worm = Worm(starts=2, module=4.0, pitch_diameter=50.0)
+        wheel = WormWheel(teeth=40, module=4.0, face_width=30.0)
+        with pytest.raises(ValueError):
+            worm.permissible_load(wheel, wheel_material_key="unobtainium")
+
+    def test_worm_force_report_validation(self):
+        """Non-positive power/speed or negative friction raises."""
+        worm = Worm(starts=2, module=4.0, pitch_diameter=50.0)
+        wheel = WormWheel(teeth=40, module=4.0)
+        with pytest.raises(ValueError):
+            worm.force_report(power_kw=0.0, speed_rpm=1750.0, wheel=wheel)
+        with pytest.raises(ValueError):
+            worm.force_report(power_kw=3.0, speed_rpm=0.0, wheel=wheel)
+        with pytest.raises(ValueError):
+            worm.force_report(power_kw=3.0, speed_rpm=1750.0, wheel=wheel,
+                              friction_coefficient=-0.1)
+
+    def test_worm_describe_and_repr(self):
+        """describe_forces reports both members; repr names the class."""
+        worm = Worm(starts=2, module=4.0, pitch_diameter=50.0, name="w1")
+        wheel = WormWheel(teeth=40, module=4.0, name="ww")
+        text = worm.describe_forces(power_kw=3.0, speed_rpm=1750.0, wheel=wheel)
+        assert "wheel tangential force" in text
+        assert "w1" in text
+        assert worm.__repr__().startswith("Worm(")
+
+    def test_wheel_describe_forces(self):
+        """The wheel-side report is formatted and names the class."""
+        worm = Worm(starts=2, module=4.0, pitch_diameter=50.0)
+        wheel = WormWheel(teeth=40, module=4.0, name="ww")
+        wheel_speed = 1750.0 / worm.ratio_with(wheel)
+        text = wheel.describe_forces(power_kw=3.0, speed_rpm=wheel_speed, worm=worm)
+        assert "tangential force (Ft)" in text
+        assert "ww" in text
+
+    def test_wheel_negative_face_width_raises(self):
+        """A non-positive wheel face width is rejected."""
+        with pytest.raises(ValueError):
+            WormWheel(teeth=40, module=4.0, face_width=-1.0)
+
 
 class TestRack:
     """Test cases for Rack."""
@@ -446,6 +592,12 @@ class TestRack:
         rack = Rack(module=2.0, length=200.0)
         assert rack.circular_pitch == pytest.approx(math.pi * 2.0)
         assert rack.n_teeth == pytest.approx(200.0 / (math.pi * 2.0))
+
+    def test_addendum_dedendum(self):
+        """Addendum = m, dedendum = 1.25 m."""
+        rack = Rack(module=2.0)
+        assert rack.addendum == pytest.approx(2.0)
+        assert rack.dedendum == pytest.approx(2.5)
 
     def test_travel_per_pinion_rev(self):
         """Travel per pinion revolution is pi * d_pinion."""
@@ -460,6 +612,40 @@ class TestRack:
         pinion = SpurGear(teeth=20, module=2.0)
         assert rack.linear_velocity(pinion, 600.0) == pytest.approx(
             math.pi * 40.0 * 600.0 / 60000.0)
+
+    def test_diametral_pitch_constructor(self):
+        """A diametral pitch converts to module (25.4/DP)."""
+        rack = Rack(module=None, diametral_pitch=12.0)
+        assert rack.module == pytest.approx(25.4 / 12.0)
+
+    @pytest.mark.parametrize("kwargs", [
+        {"module": 2.0, "diametral_pitch": 12.0},   # both given
+        {"module": None, "diametral_pitch": None},   # neither given
+        {"module": None, "diametral_pitch": -1.0},   # bad DP
+        {"module": -2.0},                            # bad module
+        {"module": 2.0, "pressure_angle": 50.0},     # bad angle
+        {"module": 2.0, "length": -10.0},            # bad length
+        {"module": 2.0, "face_width": -5.0},         # bad face width
+    ])
+    def test_rack_invalid_inputs_raise(self, kwargs):
+        """Constructor rejects inconsistent or non-physical inputs."""
+        with pytest.raises(ValueError):
+            Rack(**kwargs)
+
+    def test_n_teeth_requires_length(self):
+        """Counting teeth needs the rack length set."""
+        rack = Rack(module=2.0, length=None)
+        with pytest.raises(ValueError):
+            rack.n_teeth
+
+    def test_rack_describe_and_repr(self):
+        """describe_forces reports the reacted force; repr names the class."""
+        rack = Rack(module=2.0, name="r1")
+        pinion = SpurGear(teeth=20, module=2.0)
+        text = rack.describe_forces(pinion, power_kw=1.0, speed_rpm=600.0)
+        assert "driving force (Ft)" in text
+        assert "r1" in text
+        assert rack.__repr__().startswith("Rack(")
 
 
 class TestPlanetary:

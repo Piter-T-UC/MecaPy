@@ -499,6 +499,41 @@ class Material:
         return (self.ka * self.kb * self.kc * self.ke * self.kf
                 * self.se_prime)
 
+    def describe_marin_factors(self):
+        """
+        Multi-line report of the Marin factors, strengths and S-N line.
+
+        Each line is formatted as ``label (symbol) = value unit``, e.g.
+        ``surface factor (ka) = 0.8934``. The string is returned, not
+        printed; use ``print(material.describe_marin_factors())``.
+
+        Returns:
+            str: Formatted Marin-factor / endurance-limit report.
+        """
+        header = f"{self.__class__.__name__} Marin factors"
+        if self.name:
+            header += f" '{self.name}'"
+        lines = [
+            header,
+            "=" * 40,
+            f"ultimate strength (Sut) = {self.ultimate_strength:.3f} MPa",
+            f"ultimate strength at temperature (Sut_T) = "
+            f"{self.ultimate_strength_temperature:.3f} MPa",
+            f"yield strength (Sy) = {self.yield_strength:.3f} MPa",
+            f"surface factor (ka) = {self.ka:.4f}",
+            f"size factor (kb) = {self.kb:.4f}",
+            f"load factor (kc) = {self.kc:.4f}",
+            f"temperature factor (kd) = {self.kd:.4f}",
+            f"reliability factor (ke) = {self.ke:.4f}",
+            f"miscellaneous-effects factor (kf) = {self.kf:.4f}",
+            f"unmodified endurance limit (Se') = {self.se_prime:.3f} MPa",
+            f"corrected endurance limit (Se) = {self.endurance_limit:.3f} MPa",
+            f"fatigue-strength fraction (f) = {self.f:.4f}",
+            f"S-N coefficient (a) = {self.sn_a:.3f} MPa",
+            f"S-N exponent (b) = {self.sn_b:.4f}",
+        ]
+        return "\n".join(lines)
+
     # ---- Notch sensitivity (Neuber) ----
 
     def _neuber_sqrt_a(self, loading):

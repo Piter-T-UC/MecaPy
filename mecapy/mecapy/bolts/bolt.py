@@ -2,34 +2,44 @@
 
 Units convention: geometry in mm, forces in N, moments in N*mm and
 stresses in MPa (N/mm^2), consistent with the other element modules
-(gears, shafts). Bolt strength data comes from the ISO 898-1 property
-classes in :mod:`mecapy.bolts.thread_data`.
+(gears, shafts). Metric and imperial bolts share this one class and this
+one unit convention: Unified inch threads and SAE J429 grades are
+converted to mm/MPa in :mod:`mecapy.bolts.thread_data`, so nothing
+downstream needs to know which system a bolt came from.
+
+Dimensional inputs additionally accept a ``pint.Quantity`` (e.g.
+``length=2 * ureg.inch``), which is converted to mm at the boundary; plain
+floats are assumed to be in mm and behave exactly as before.
 """
 
 from math import pi
 
 from ..base import MechaElement
 from ..materials import CyclicLoadCases, Material
+from ..utils.units import to_magnitude
 from .thread_data import (
     SHIGLEY_MINOR_COEFF,
     SHIGLEY_PITCH_COEFF,
     get_property_class,
     get_thread,
+    normalize_thread_size,
     shigley_thread_geometry,
+    threaded_length,
 )
 
 
 class Bolt(CyclicLoadCases, MechaElement):
     """
-    ISO metric bolt design and analysis.
+    Bolt design and analysis (ISO metric or Unified inch).
 
     Thread geometry (nominal diameter, pitch, tensile stress area) is
-    looked up from the ISO coarse-thread table, and strength values from
-    the ISO 898-1 property-class table. Inherits shared material access
+    looked up from the ISO coarse-thread table or the Unified inch (UNC /
+    UNF) table, and strength values from the ISO 898-1 property-class
+    table or the SAE J429 grade table. Inherits shared material access
     from :class:`~mecapy.base.MechaElement`; the elastic modulus used for
     stiffness and elongation comes from the element material.
 
-    Bolts outside the coarse table (fine series, custom pitches) can be
+    Bolts outside both tables (fine metric series, custom pitches) can be
     built from an explicit ``diameter`` and ``pitch`` instead of a
     ``size``; their stress area is then computed with Shigley's formulas
     (mean of pitch and minor diameters). The same formula can be forced
@@ -38,12 +48,14 @@ class Bolt(CyclicLoadCases, MechaElement):
         Bolt(size="M10", length=50)                     # table area
         Bolt(size="M10", length=50, stress_area_method="shigley")
         Bolt(length=50, diameter=12, pitch=1.25)        # fine thread
+        Bolt(size="1/2-13", length=50, property_class="5")  # UNC, SAE 5
 
     Attributes:
-        size (str): Thread designation, e.g. "M10" (custom bolts get a
-            synthesized "M<d>x<p>" designation).
+        size (str): Thread designation, e.g. "M10" or "1/2-13" (custom
+            bolts get a synthesized "M<d>x<p>" designation).
         length (float): Bolt length (grip length) in mm.
-        property_class (str): ISO 898-1 property class, e.g. "8.8".
+        property_class (str): ISO 898-1 property class (e.g. "8.8") or
+            SAE J429 grade (e.g. "5").
         material (str): Material type (used for elastic modulus).
         stress_area_method (str): "table" or "shigley" — source of
             :attr:`stress_area`.
@@ -55,16 +67,20 @@ class Bolt(CyclicLoadCases, MechaElement):
         Initialize a Bolt object.
 
         Args:
-            size (str): ISO thread designation (e.g. "M10"). Mutually
-                exclusive with ``diameter``/``pitch``.
-            length (float): Bolt length (grip length) in mm. Required.
-            property_class (str): ISO 898-1 property class (default: "8.8").
+            size (str): ISO metric or Unified inch thread designation
+                (e.g. "M10", "1/2-13"). Mutually exclusive with
+                ``diameter``/``pitch``.
+            length (float): Bolt length (grip length) in mm, or a
+                pint.Quantity of length. Required.
+            property_class (str): ISO 898-1 property class or SAE J429
+                grade (default: "8.8").
             material (str): Material type (default: "steel").
             name (str): Optional identifier for the bolt.
-            diameter (float): Nominal thread diameter in mm for a custom
-                (non-table) bolt. Requires ``pitch``.
-            pitch (float): Thread pitch in mm for a custom bolt.
-                Requires ``diameter``.
+            diameter (float): Nominal thread diameter in mm (or a
+                pint.Quantity) for a custom (non-table) bolt. Requires
+                ``pitch``.
+            pitch (float): Thread pitch in mm (or a pint.Quantity) for a
+                custom bolt. Requires ``diameter``.
             stress_area_method (str): "table" (default for table sizes)
                 or "shigley" to compute the stress area with Shigley's
                 formulas. Custom bolts always use "shigley".
@@ -85,8 +101,7 @@ class Bolt(CyclicLoadCases, MechaElement):
                 raise ValueError(
                     "Provide either a table size or diameter and pitch, not both"
                 )
-            get_thread(size)  # validate the size (raises on unknown)
-            self._size = size
+            self._size = normalize_thread_size(size)  # validates (raises on unknown)
             self._custom_diameter = None
             self._custom_pitch = None
             self._stress_area_method = stress_area_method or "table"
@@ -96,6 +111,8 @@ class Bolt(CyclicLoadCases, MechaElement):
                     "stress_area_method='table' requires a table size "
                     "(e.g. 'M10'), not a custom diameter and pitch"
                 )
+            diameter = to_magnitude(diameter, "mm")
+            pitch = to_magnitude(pitch, "mm")
             shigley_thread_geometry(diameter, pitch)  # validate the geometry
             self._size = None
             self._custom_diameter = diameter
@@ -109,25 +126,34 @@ class Bolt(CyclicLoadCases, MechaElement):
             )
         if length is None:
             raise ValueError("Bolt length must be provided")
-        if length <= 0:
-            raise ValueError("Bolt length must be strictly positive")
-        self.length = length
+        self.length = length  # validating setter
         self.property_class = property_class  # validating setter
 
     # ---- Settable primary inputs (recompute the lookups, never cache) ----
 
     @property
+    def length(self):
+        """float: Bolt length (grip length) in mm. Settable (D1)."""
+        return self._length
+
+    @length.setter
+    def length(self, value):
+        value = to_magnitude(value, "mm")
+        if value <= 0:
+            raise ValueError("Bolt length must be strictly positive")
+        self._length = value
+
+    @property
     def size(self):
-        """str: Thread designation, e.g. "M10" (synthesized "M<d>x<p>" for a
-        custom bolt). Settable to another table size (D1)."""
+        """str: Thread designation, e.g. "M10" or "1/2-13" (synthesized
+        "M<d>x<p>" for a custom bolt). Settable to another table size (D1)."""
         if self._size is not None:
             return self._size
         return f"M{self._custom_diameter:g}x{self._custom_pitch:g}"
 
     @size.setter
     def size(self, value):
-        get_thread(value)  # validate the new size
-        self._size = value
+        self._size = normalize_thread_size(value)  # validates the new size
         self._custom_diameter = None
         self._custom_pitch = None
 
@@ -149,7 +175,8 @@ class Bolt(CyclicLoadCases, MechaElement):
 
     @property
     def property_class(self):
-        """str: ISO 898-1 property class, e.g. "8.8". Settable (D1)."""
+        """str: ISO 898-1 property class (e.g. "8.8") or SAE J429 grade
+        (e.g. "5"). Settable (D1)."""
         return self._property_class
 
     @property_class.setter
@@ -173,9 +200,11 @@ class Bolt(CyclicLoadCases, MechaElement):
 
     @property
     def _strength(self):
-        """dict: Property-class strengths resolved fresh from
-        :attr:`property_class`, so mutating it updates the strengths."""
-        return get_property_class(self._property_class)
+        """dict: Property-class (or SAE grade) strengths resolved fresh from
+        :attr:`property_class` and the current nominal diameter, so mutating
+        either updates the strengths — SAE grades 2 and 5 are derated above
+        3/4 in and 1 in respectively."""
+        return get_property_class(self._property_class, self.nominal_diameter)
 
     # ---- Thread geometry ----
 
@@ -191,8 +220,22 @@ class Bolt(CyclicLoadCases, MechaElement):
 
     @property
     def pitch(self):
-        """float: Thread pitch in mm (ISO coarse series)."""
+        """float: Thread pitch in mm."""
         return self._thread["pitch"]
+
+    @property
+    def threads_per_inch(self):
+        """float: Threads per inch, 25.4/p — the imperial read-back of
+        :attr:`pitch` (mirrors ``Gear.diametral_pitch``)."""
+        return 25.4 / self.pitch
+
+    @property
+    def thread_series(self):
+        """str: Thread series — "ISO metric", "UNC", "UNF", or "custom" for a
+        bolt built from an explicit diameter and pitch."""
+        if self._size is None:
+            return "custom"
+        return self._thread.get("series", "ISO metric")
 
     @property
     def minor_diameter(self):
@@ -260,13 +303,78 @@ class Bolt(CyclicLoadCases, MechaElement):
 
     @property
     def stiffness(self):
-        """float: Axial stiffness k = As * E / L in N/mm.
+        """float: Free-length axial stiffness k = As * E / L in N/mm.
 
-        Simple single-area model: the tensile stress area is assumed
-        over the full length, which is conservative (a segmented
-        shank/thread model would give a slightly stiffer bolt).
+        Single-area model of the bolt on its own: the tensile stress
+        area is assumed over the whole length. This is the spring
+        behind :meth:`elongation`, and it is deliberately *not* the
+        stiffness used in joint analysis -- a bolt in a grip is stiffer,
+        because part of the grip is unthreaded shank. See
+        :meth:`segmented_stiffness` and
+        :attr:`mecapy.bolts.BoltedUnion.bolt_stiffness`.
         """
         return self.stress_area * self.elastic_modulus / self.length
+
+    @property
+    def threaded_length(self):
+        """float: Threaded length LT in mm (Shigley Table 8-7).
+
+        LT = 2*d + 6 mm for lengths up to 125 mm, +12 mm up to 200 mm
+        and +25 mm beyond; Unified threads use the inch column of the
+        same table. Not capped at :attr:`length`: a bolt shorter than
+        its own LT is fully threaded, i.e. :attr:`shank_length` is 0.
+        """
+        return threaded_length(self.nominal_diameter, self.length, self.thread_series)
+
+    @property
+    def shank_length(self):
+        """float: Unthreaded shank length ld = L - LT in mm, floored at 0."""
+        return max(self.length - self.threaded_length, 0.0)
+
+    def segmented_stiffness(self, grip):
+        """
+        Axial stiffness of the bolt in a grip (Shigley Eq. 8-17).
+
+        The bolt in a joint is two springs in series: the unthreaded
+        shank (nominal area Ad over ld) and the threaded portion
+        (stress area At over lt), giving::
+
+            kb = Ad*At*E / (Ad*lt + At*ld)
+
+        with ld the shank length inside the grip and lt = grip - ld the
+        threaded length inside it (Shigley Eqs. 8-13/8-14). Both
+        degenerate cases are meaningful rather than errors: a shank
+        running past the grip gives a fully unthreaded grip
+        (kb = Ad*E/grip), and a bolt threaded to the head gives
+        kb = At*E/grip. This is always stiffer than the free-length
+        :attr:`stiffness`.
+
+        Args:
+            grip (float): Grip length in mm (or a pint.Quantity length).
+
+        Returns:
+            float: Bolt stiffness kb in N/mm.
+
+        Raises:
+            ValueError: If ``grip`` is not strictly positive or exceeds
+                the bolt length.
+        """
+        grip = to_magnitude(grip, "mm")
+        if grip <= 0:
+            raise ValueError("Grip must be strictly positive")
+        if grip > self.length:
+            raise ValueError(
+                f"Grip {grip} mm exceeds the bolt length {self.length} mm"
+            )
+        area_shank = self.nominal_area
+        area_thread = self.stress_area
+        ld = min(self.shank_length, grip)
+        lt = grip - ld
+        modulus = self.elastic_modulus
+        return (
+            area_shank * area_thread * modulus
+            / (area_shank * lt + area_thread * ld)
+        )
 
     def elongation(self, force):
         """

@@ -3,5 +3,6 @@
 from . import constants
 from . import converters
 from . import thermal
+from . import units
 
-__all__ = ["constants", "converters", "thermal"]
+__all__ = ["constants", "converters", "thermal", "units"]

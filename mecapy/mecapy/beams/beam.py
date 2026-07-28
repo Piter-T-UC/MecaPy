@@ -1,6 +1,6 @@
 """Beam analysis built on top of SymPy's continuum-mechanics beam."""
 
-from sympy import Rational, symbols
+from sympy import Rational, symbols, sympify
 from sympy.physics.continuum_mechanics.beam import Beam as _SymBeam
 
 from ..base import MechaElement
@@ -68,10 +68,23 @@ class Beam(MechaElement):
         Returns:
             Beam: ``self`` to allow method chaining.
         """
-        self._beam.apply_support(location, kind)
-        self._reactions.append(symbols(f"R_{location}"))
-        if kind == "fixed":
-            self._reactions.append(symbols(f"M_{location}"))
+        # Take the reaction symbols straight from SymPy rather than
+        # rebuilding their names. SymPy sympifies the location first, so a
+        # float location 3.5 becomes the symbol ``R_3.50000000000000``;
+        # naming it ``R_3.5`` here would hand solve_for_reaction_loads() an
+        # unknown that appears in none of its equations.
+        created = self._beam.apply_support(location, kind)
+        if created is None:  # pragma: no cover - older SymPy without a return
+            loc = sympify(location)
+            created = (
+                (symbols(f"R_{loc}"), symbols(f"M_{loc}"))
+                if kind == "fixed"
+                else symbols(f"R_{loc}")
+            )
+        if isinstance(created, tuple):
+            self._reactions.extend(created)
+        else:
+            self._reactions.append(created)
         self._solved = False
         return self
 

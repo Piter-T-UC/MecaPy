@@ -89,9 +89,10 @@ def save_plots():
     union4.plot_distribution(n=24, show=False, ax=ax)
     ax.set_title("Cross Joint: Symmetric Loading", fontweight='bold')
 
-    plt.tight_layout()
-    plt.savefig('welded_joint_stresses.png', dpi=150, bbox_inches='tight')
-    print("[OK] Saved: welded_joint_stresses.png")
+    #plt.tight_layout()
+    #plt.show()
+    #plt.savefig('welded_joint_stresses.png', dpi=150, bbox_inches='tight')
+    #print("[OK] Saved: welded_joint_stresses.png")
 
 
 if __name__ == "__main__":

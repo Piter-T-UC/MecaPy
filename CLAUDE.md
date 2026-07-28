@@ -76,13 +76,15 @@ stress/safety-factor calculations:
 MechaElement                              # material_properties, calculate_stress(F, A), safety_factor(stress)
 ├── Beam (beams/)                         # SymPy-backed: reactions, shear, moment, deflection
 ├── Shaft (shafts/)                       # + torsional_stress()
-│   └── PowerScrew (shafts/power_screw.py)  # lead screw: thread stresses, buckling, efficiency
+│   └── PowerScrew (shafts/power_screw.py)  # lead screw: thread stresses, buckling (composes Column), efficiency
+├── Column (columns/)                     # Euler/Johnson strut buckling, secant formula (Shigley Ch. 4)
+├── Key / Pin / Rivet (joints/)           # torque/shear connections: shear+bearing checks (Shigley Ch. 7-8)
 ├── Gear (gears/)                         # base gear geometry; see gear type hierarchy below
 ├── Wheel (wheels/)                       # pulleys, sprockets; + moment_of_inertia, kinetic_energy
 │   └── Flywheel (wheels/flywheel.py)     # energy fluctuation sizing, rotating-disc stresses (SI)
 ├── Bearing (bearings/)                   # rolling contact stress & life
 ├── Bolt (bolts/)                         # ISO metric: tension, preload, stiffness
-│   └── BoltedUnion (bolts/)              # joint: load distribution, separation, efficiency
+│   └── BoltedUnion (bolts/)              # joint: load distribution, preload chain, member checks
 ├── AxialFrictionInterface (clutches/)    # annular friction math: uniform pressure & uniform wear
 │   ├── DiscClutch                        # flat disc (= full-annulus disc brake, alias DiscBrake)
 │   └── ConeClutch                        # wedging cone, 1/sin(alpha) torque amplification
@@ -172,6 +174,11 @@ through `mecapy/materials.py` (`get_material_properties`, `get_available_materia
   - Single source of truth for mesh compatibility (`_check_mesh()`)
   - Kinematic model: speed ratios, output torque/power
   - Reused by AGMA rating and other pair methods
+  - Train-level AGMA: `rate_agma(stage_kwargs=None, **kwargs)` returns one
+    `AGMARating` per cylindrical stage (each tagged with `stage_index`, rated at
+    its own propagated speed/power); `agma_governing()` gives the worst SF/SH and
+    which stage they come from, `agma_summary()` prints the whole train.
+    Bevel/worm stages are skipped and listed by `agma_unrated_stages`.
 - **AGMA Rating** (`agma.py` + `agma_data.py`) — fatigue & contact stress
   - Implements AGMA 2101-D04 (metric) for cylindrical gears
   - Bending stress (Lewis + geometry factor) and pitting (Hertzian contact)
@@ -191,12 +198,45 @@ through `mecapy/materials.py` (`get_material_properties`, `get_available_materia
 - **`Bolt`** — ISO metric bolt
   - Thread geometry from ISO 898-1 coarse table (diameter, pitch, stress area)
   - Strength data from ISO 898-1 property classes (8.8, 10.9, etc.)
-  - Stiffness, preload capacity, tensile stress calculation
+  - Preload capacity, tensile stress calculation
+  - **Two stiffnesses, deliberately.** `stiffness` is the free-length spring
+    `As*E/L` behind `elongation()`; `segmented_stiffness(grip)` is Shigley
+    Eq. 8-17 `kb = Ad*At*E/(Ad*lt + At*ld)`, splitting the grip into unthreaded
+    shank and thread via the Table 8-7 rule (`threaded_length` in `thread_data.py`,
+    also `Bolt.threaded_length` / `shank_length`). Joint analysis always uses the
+    segmented one
 - **`BoltedUnion`** — multi-bolt joint
   - Models load distribution across bolt group
   - Eccentric load handling (moment splitting)
+  - Bending Mx/My resolves about the **extreme bolt** on the compression side by
+    default (`bending_reference="extreme"`): the plate cannot pull, so lever arms
+    are measured from that pivot bolt and every bolt takes tension (`>= 0`, zero
+    at the pivot), the compression being reacted by plate bearing there. Torsion
+    Mz always uses the centroid. `bending_reference="centroid"` restores the
+    classic centroidal-axis split (tension half / compression half, Fz-balanced).
+    `bending_pivots` names the pivot bolt per axis; `bolt_forces()` breaks the
+    axial load down into `axial_direct` / `axial_bending_x` / `axial_bending_y`
   - Joint separation & slip safety factors
-  - `plot_distribution()` visualizes the per-bolt shear breakdown (matplotlib)
+  - **Preload chain** (needs `plates`): `bolt_stiffness` (segmented, over
+    `effective_grip`), `member_stiffness` (30° frusta), `joint_constant`
+    C = kb/(kb+km), `effective_preload`. `bolt_tensions()` returns per bolt the
+    external load P (which already includes the Fz share *and* the Mx/My bending
+    share), the resultant bolt load `Fb = Fi + C*P` and the member load
+    `Fm = (1-C)*P - Fi`
+  - **Tapped / blind holes**: `tapped=True` makes the last member tapped instead
+    of nutted. `grip` stays the physical stack; `effective_grip` is Shigley's
+    `l' = h + t2/2` (or `h + d/2` when `t2 >= d`) and is what the whole stiffness
+    chain uses. Bolt length is validated both ways — it must reach in without
+    bottoming out
+  - **Member-side checks**: `bearing_stresses()` / `bearing_safety_factors()`
+    (`V/(d*t)` on each plate, bolt nominal `d` bears — not the hole),
+    `clamp_states()` (clamp `-Fm`, `separated` flag, washer-face pressure `Fb/Aw`
+    over the `dw = 1.5*d` annulus), and `minimum_edge_distances(safety_factor)`
+    which reports the tear-out edge distance you must *provide* rather than
+    demanding one as input
+  - `describe()` / `joint_report()` summarize the whole chain (both degrade
+    gracefully without plates); `plot_distribution()` visualizes the per-bolt
+    shear breakdown and `plot_tension()` the preload/bolt-load/clamp bars
 
 ### Beams (`mecapy/beams/`)
 **Purpose:** static & dynamic analysis of bending members.
@@ -421,7 +461,7 @@ Transmission (transmission.py) — orchestrates meshes
 #### Rating Strategies
 
 **AGMA 2101-D04** (Cylindrical gears only: Spur, Helical, Herringbone, pinion-on-rack)
-- Files: `agma.py`, `agma_data.py`, `agma_factors.py`
+- Files: `agma.py`, `agma_data.py`
 - Two equations:
   - **Bending:** Lewis stress with geometry factor J, K factors (load, life, reliability)
   - **Pitting:** Hertzian contact stress with surface finish, hardness factors

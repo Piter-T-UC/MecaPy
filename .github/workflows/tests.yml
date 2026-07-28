@@ -6,18 +6,26 @@ on:
   pull_request:
     branches: [ main, develop ]
 
+defaults:
+  run:
+    # The Python project lives in the mecapy/ subdirectory of this repo.
+    working-directory: mecapy
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Pinned to 22.04: the ubuntu-latest image no longer provides Python 3.8,
+    # which setup.py still declares as the minimum supported version.
+    runs-on: ubuntu-22.04
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ['3.8', '3.9', '3.10', '3.11']
+        python-version: ['3.8', '3.9', '3.10', '3.11', '3.12']
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
 
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
 
@@ -36,9 +44,9 @@ jobs:
         pytest --cov=mecapy --cov-report=xml --cov-report=term-missing
 
     - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v3
+      uses: codecov/codecov-action@v5
       with:
-        file: ./coverage.xml
+        files: ./mecapy/coverage.xml
         flags: unittests
         name: codecov-umbrella
         fail_ci_if_error: false
