@@ -73,12 +73,19 @@ class Gear(MechaElement):
         profile_shift (float): Profile shift coefficient x (dimensionless,
             0 for standard teeth). Settable through the cylindrical gear
             constructors; always 0 for other gear types.
+        internal (bool): True for an internal (ring) gear, whose teeth
+            point inwards. Settable through the cylindrical gear
+            constructors; always False for other gear types.
         material (str): Material type.
     """
 
     #: Minimum number of teeth accepted by the constructor. Subclasses
     #: override (e.g. cylindrical gears require more; worms allow 1 start).
     _min_teeth = 1
+
+    #: External gear by default. :class:`~mecapy.gears.CylindricalGear`
+    #: sets an instance attribute that shadows this.
+    internal = False
 
     def __init__(self, teeth, module=None, pressure_angle=20.0,
                  material="steel", name=None, diametral_pitch=None,
@@ -213,14 +220,32 @@ class Gear(MechaElement):
         return self.module * (1.25 - self.profile_shift)
 
     @property
+    def _sign(self):
+        """int: +1 for an external gear, -1 for an internal (ring) gear.
+
+        The addendum and dedendum keep their magnitudes on an internal
+        gear; only the direction in which they are applied flips.
+        """
+        return -1 if self.internal else 1
+
+    @property
     def outside_diameter(self):
-        """float: Outside (tip) diameter in mm."""
-        return self.pitch_diameter + 2 * self.addendum
+        """float: Outside (tip) diameter in mm.
+
+        ``d + 2 ha`` for an external gear. On an internal gear the tip
+        circle lies *inside* the pitch circle, so it is ``d - 2 ha``.
+        """
+        return self.pitch_diameter + self._sign * 2 * self.addendum
 
     @property
     def root_diameter(self):
-        """float: Root diameter in mm."""
-        return self.pitch_diameter - 2 * self.dedendum
+        """float: Root diameter in mm.
+
+        ``d - 2 hf`` for an external gear. On an internal gear the root
+        circle lies *outside* the pitch circle, so it is ``d + 2 hf``
+        and ``outside_diameter < pitch_diameter < root_diameter``.
+        """
+        return self.pitch_diameter - self._sign * 2 * self.dedendum
 
     @property
     def whole_depth(self):
@@ -247,11 +272,15 @@ class Gear(MechaElement):
         """float: Arc tooth thickness at the pitch circle in mm.
 
         s = m * (pi / 2 + 2 * x * tan(alpha)). For helical gears this is
-        the normal tooth thickness.
+        the normal tooth thickness. On an internal gear tooth and space
+        swap roles, so the shift term changes sign:
+        s = m * (pi / 2 - 2 * x * tan(alpha)).
         """
         alpha = math.radians(self.pressure_angle)
-        return self.module * (math.pi / 2
-                              + 2 * self.profile_shift * math.tan(alpha))
+        return self.module * (
+            math.pi / 2
+            + self._sign * 2 * self.profile_shift * math.tan(alpha)
+        )
 
     @property
     def base_pitch(self):
@@ -378,10 +407,13 @@ class Gear(MechaElement):
 
         Returns:
             dict: With keys ``Ft``, ``Fr``, ``Fa`` (forces in N),
-            ``torque`` and ``moment`` (in N*m) and
-            ``pitch_line_velocity`` (in m/s). ``torque`` is Ft times the
-            pitch radius; ``moment`` is the thrust Fa times the pitch
-            radius (0 without an axial force).
+            ``torque`` and ``moment`` (in N*m),
+            ``pitch_line_velocity`` (in m/s) and ``internal`` (bool).
+            ``torque`` is Ft times the pitch radius; ``moment`` is the
+            thrust Fa times the pitch radius (0 without an axial force).
+            All forces are magnitudes; ``internal`` flags that the
+            radial force is directed *towards* the gear centre (the mesh
+            pulls the ring inwards) instead of away from it.
 
         Raises:
             ValueError: If power or speed is not strictly positive.
@@ -397,6 +429,7 @@ class Gear(MechaElement):
             "torque": ft * r / 1000.0,
             "moment": fa * r / 1000.0,
             "pitch_line_velocity": self.pitch_line_velocity(speed_rpm),
+            "internal": bool(self.internal),
         }
 
     def describe_forces(self, power_kw=None, speed_rpm=None):
@@ -417,10 +450,12 @@ class Gear(MechaElement):
             str: Formatted force/moment report.
         """
         f = self.force_report(power_kw, speed_rpm)
+        power_kw = self._resolve_power(power_kw)
+        speed_rpm = self._resolve_speed(speed_rpm)
         header = f"{self.__class__.__name__} forces and moments"
         if self.name:
             header += f" '{self.name}'"
-        return "\n".join([
+        lines = [
             header,
             "=" * 40,
             f"transmitted power (P) = {power_kw:.3f} kW",
@@ -431,7 +466,13 @@ class Gear(MechaElement):
             f"axial force (Fa) = {f['Fa']:.1f} N",
             f"torque (T) = {f['torque']:.3f} N*m",
             f"axial moment (Ma) = {f['moment']:.3f} N*m",
-        ])
+        ]
+        if f["internal"]:
+            lines.append(
+                "note: internal mesh - the radial force is directed "
+                "towards the gear centre"
+            )
+        return "\n".join(lines)
 
     def describe(self):
         """

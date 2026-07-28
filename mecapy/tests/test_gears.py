@@ -692,11 +692,42 @@ class TestPlanetary:
         """Gear objects work and must share a module."""
         sun = SpurGear(24, module=2.0)
         planet = SpurGear(18, module=2.0)
-        ring = SpurGear(60, module=2.0)
+        ring = SpurGear(60, module=2.0, internal=True)
         ps = PlanetaryGearSet(sun, planet, ring, n_planets=3)
         assert ps.ratio("sun", "carrier", "ring") == pytest.approx(3.5)
         with pytest.raises(ValueError):
             PlanetaryGearSet(sun, SpurGear(18, module=3.0), ring)
+
+    def test_ring_must_be_internal(self):
+        """An external gear object cannot be the ring."""
+        sun = SpurGear(24, module=2.0)
+        planet = SpurGear(18, module=2.0)
+        with pytest.raises(ValueError):
+            PlanetaryGearSet(sun, planet, SpurGear(60, module=2.0))
+
+    def test_ring_is_built_as_internal(self):
+        """A plain ring teeth count becomes a real internal gear."""
+        sun = SpurGear(24, module=2.0)
+        planet = SpurGear(18, module=2.0)
+        ps = PlanetaryGearSet(sun, planet, 60, n_planets=3)
+        assert ps.ring.internal is True
+        assert ps.ring.teeth == 60
+        assert ps.ring.module == pytest.approx(2.0)
+        assert ps.ring.pitch_diameter == pytest.approx(120.0)
+
+    def test_concentricity_catches_shifted_set(self):
+        """Profile shift can break concentricity the teeth rule allows."""
+        sun = SpurGear(24, module=2.0, profile_shift=0.3)
+        planet = SpurGear(18, module=2.0)
+        with pytest.raises(ValueError, match="Concentricity"):
+            PlanetaryGearSet(sun, planet, 60, n_planets=3)
+
+    def test_carrier_radius(self):
+        """Carrier radius is the sun-planet center distance."""
+        sun = SpurGear(24, module=2.0)
+        planet = SpurGear(18, module=2.0)
+        ps = PlanetaryGearSet(sun, planet, 60, n_planets=3)
+        assert ps.carrier_radius == pytest.approx(42.0)
 
 
 class TestForces:
@@ -849,3 +880,133 @@ class TestOperatingPoint:
         before = g.tangential_force()
         g.speed_rpm = 3000.0
         assert g.tangential_force() == pytest.approx(before / 2)
+
+
+class TestInternalGear:
+    """Geometry of a single internal (ring) gear."""
+
+    def test_geometry_is_inverted(self):
+        """Tip circle inside the pitch circle, root circle outside."""
+        ring = SpurGear(80, module=2.0, internal=True)
+        assert ring.pitch_diameter == pytest.approx(160.0)
+        assert ring.outside_diameter == pytest.approx(156.0)
+        assert ring.root_diameter == pytest.approx(165.0)
+        assert (ring.outside_diameter < ring.pitch_diameter
+                < ring.root_diameter)
+
+    def test_radii_follow_diameters(self):
+        """The radius accessors stay consistent with the diameters."""
+        ring = SpurGear(80, module=2.0, internal=True)
+        assert ring.outside_radius == pytest.approx(78.0)
+        assert ring.root_radius == pytest.approx(82.5)
+
+    def test_addendum_magnitudes_unchanged(self):
+        """Only the direction flips; ha and hf keep their values."""
+        ring = SpurGear(80, module=2.0, internal=True)
+        external = SpurGear(80, module=2.0)
+        assert ring.addendum == pytest.approx(external.addendum)
+        assert ring.dedendum == pytest.approx(external.dedendum)
+        assert ring.base_diameter == pytest.approx(external.base_diameter)
+
+    def test_tooth_thickness_shift_sign_flips(self):
+        """Tooth and space swap, so the shift term changes sign."""
+        ring = SpurGear(80, module=2.0, internal=True, profile_shift=0.3)
+        external = SpurGear(80, module=2.0, profile_shift=0.3)
+        nominal = math.pi * 2.0 / 2
+        assert ring.tooth_thickness < nominal < external.tooth_thickness
+        assert (ring.tooth_thickness + external.tooth_thickness
+                == pytest.approx(2 * nominal))
+
+    def test_undercut_does_not_apply(self):
+        """Undercut is False and its inputs raise on an internal gear."""
+        ring = SpurGear(80, module=2.0, internal=True)
+        assert ring.is_undercut is False
+        with pytest.raises(ValueError, match="internal"):
+            _ = ring.min_profile_shift
+        with pytest.raises(ValueError, match="internal"):
+            _ = ring.min_teeth_no_undercut
+
+    def test_too_few_teeth_rejected(self):
+        """A tip circle inside the base circle is not usable."""
+        with pytest.raises(ValueError, match="base circle"):
+            SpurGear(30, module=2.0, internal=True)
+
+    def test_profile_shift_change_is_validated(self):
+        """A bad shift is rejected and leaves the gear untouched."""
+        ring = SpurGear(36, module=2.0, internal=True)
+        with pytest.raises(ValueError, match="base circle"):
+            ring.change_profile_shift(0.9)
+        assert ring.profile_shift == 0.0
+
+    def test_describe_reports_internal(self):
+        """describe() flags the ring and swaps the undercut block."""
+        text = SpurGear(80, module=2.0, internal=True).describe()
+        assert "internal (ring) gear = yes" in text
+        assert "undercut" not in text
+        assert "trimming limit" in text
+
+    def test_force_report_flags_internal(self):
+        """Magnitudes are unchanged but the report says it is internal."""
+        ring = SpurGear(80, module=2.0, internal=True)
+        external = SpurGear(80, module=2.0)
+        f = ring.force_report(power_kw=10.0, speed_rpm=600.0)
+        g = external.force_report(power_kw=10.0, speed_rpm=600.0)
+        assert f["internal"] is True
+        assert g["internal"] is False
+        assert f["Ft"] == pytest.approx(g["Ft"])
+        assert f["Fr"] == pytest.approx(g["Fr"])
+        assert "towards the gear centre" in ring.describe_forces(10.0, 600.0)
+
+
+class TestInternalMesh:
+    """Pair geometry of an external pinion inside a ring gear."""
+
+    def test_center_distance_is_a_difference(self):
+        """a = m (z_ring - z_pinion) / 2, and it is symmetric."""
+        pinion = SpurGear(20, module=2.0)
+        ring = SpurGear(80, module=2.0, internal=True)
+        assert pinion.center_distance_with(ring) == pytest.approx(60.0)
+        assert ring.center_distance_with(pinion) == pytest.approx(60.0)
+
+    def test_working_pressure_angle_unshifted(self):
+        """With no shift the working angle is the reference angle."""
+        pinion = SpurGear(20, module=2.0)
+        ring = SpurGear(80, module=2.0, internal=True)
+        assert pinion.working_pressure_angle_with(ring) == pytest.approx(20.0)
+        assert pinion.working_center_distance_with(ring) == pytest.approx(60.0)
+
+    def test_shift_uses_the_difference(self):
+        """x_eff is x_ring - x_pinion, so equal shifts cancel."""
+        pinion = SpurGear(20, module=2.0, profile_shift=0.3)
+        ring = SpurGear(80, module=2.0, internal=True, profile_shift=0.3)
+        assert pinion.working_pressure_angle_with(ring) == pytest.approx(20.0)
+        ring.change_profile_shift(0.0)
+        assert pinion.working_pressure_angle_with(ring) < 20.0
+
+    def test_contact_ratio_exceeds_the_external_pair(self):
+        """An internal mesh has a longer line of action than external."""
+        pinion = SpurGear(20, module=2.0)
+        ring = SpurGear(80, module=2.0, internal=True)
+        external = SpurGear(80, module=2.0)
+        internal_cr = pinion.contact_ratio_with(ring)
+        assert internal_cr > pinion.contact_ratio_with(external) > 1
+        assert ring.contact_ratio_with(pinion) == pytest.approx(internal_cr)
+
+    def test_no_interference_on_a_sound_mesh(self):
+        """A 20-in-80 mesh is free of involute and trimming interference."""
+        pinion = SpurGear(20, module=2.0)
+        ring = SpurGear(80, module=2.0, internal=True)
+        assert pinion.has_interference_with(ring) is False
+        assert pinion.has_trimming_interference_with(ring) is False
+
+    def test_trimming_needs_a_tooth_difference(self):
+        """Too few teeth of difference trims the ring tooth tips."""
+        pinion = SpurGear(36, module=2.0)
+        ring = SpurGear(40, module=2.0, internal=True)
+        assert pinion.has_trimming_interference_with(ring) is True
+        assert ring.has_trimming_interference_with(pinion) is True
+
+    def test_trimming_is_external_no_op(self):
+        """External meshes have no trimming mode."""
+        assert SpurGear(20, module=2.0).has_trimming_interference_with(
+            SpurGear(21, module=2.0)) is False

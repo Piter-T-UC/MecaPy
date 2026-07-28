@@ -12,6 +12,7 @@ configurations.
 
 import math
 
+from .cylindrical import CylindricalGear, SpurGear
 from .gear import Gear
 
 
@@ -25,6 +26,12 @@ class PlanetaryGearSet:
     Accepts gear objects (e.g. :class:`~mecapy.gears.SpurGear`) or plain
     integer teeth counts; with plain integers only kinematics are
     available (no geometry checks between members beyond teeth counts).
+
+    The ring gear has internal teeth. Passing it as a gear object
+    therefore requires ``internal=True``; when the sun or planet is a
+    gear object and the ring is given as a plain teeth count, a matching
+    internal :class:`~mecapy.gears.SpurGear` is built for it, so ring
+    geometry is always available alongside sun and planet geometry.
 
     Attributes:
         sun (Gear or int): Sun gear (external, central).
@@ -41,15 +48,18 @@ class PlanetaryGearSet:
         Args:
             sun (Gear or int): Sun gear or its teeth count.
             planet (Gear or int): Planet gear or its teeth count.
-            ring (Gear or int): Ring gear or its teeth count.
+            ring (Gear or int): Ring gear or its teeth count. A gear
+                object must have ``internal=True``.
             n_planets (int): Number of equally spaced planets (>= 1).
             name (str): Optional identifier.
 
         Raises:
             ValueError: If the geometric condition ``Zr = Zs + 2 Zp``
                 fails, the assembly condition ``(Zs + Zr) % n_planets``
-                fails, adjacent planets would collide, or (for gear
-                objects) modules/pressure angles do not match.
+                fails, adjacent planets would collide, the sun-planet
+                and planet-ring center distances disagree, a ring gear
+                object is not internal, or (for gear objects) the
+                members cannot mesh.
         """
         self.sun = sun
         self.planet = planet
@@ -58,6 +68,13 @@ class PlanetaryGearSet:
         if n_planets != int(n_planets) or n_planets < 1:
             raise ValueError("Number of planets must be an integer >= 1")
         self.n_planets = int(n_planets)
+
+        if isinstance(ring, Gear) and not ring.internal:
+            raise ValueError(
+                "The ring gear of a planetary set has internal teeth; "
+                "build it with internal=True"
+            )
+        self._build_ring_if_needed()
 
         zs, zp, zr = self.sun_teeth, self.planet_teeth, self.ring_teeth
         # Geometric (concentricity) condition.
@@ -73,7 +90,8 @@ class PlanetaryGearSet:
                 f"divisible by {self.n_planets} planets"
             )
         # Consistency between gear objects.
-        gears = [g for g in (sun, planet, ring) if isinstance(g, Gear)]
+        gears = [g for g in (self.sun, self.planet, self.ring)
+                 if isinstance(g, Gear)]
         if gears:
             m0, pa0 = gears[0].module, gears[0].pressure_angle
             for g in gears[1:]:
@@ -86,11 +104,14 @@ class PlanetaryGearSet:
                         "All planetary members must share the same "
                         "pressure angle"
                     )
+            self._check_meshes()
+            self._check_concentricity()
             # Adjacency: tip circles of neighbouring planets must clear.
             if self.n_planets >= 2:
-                m = m0
-                carrier_radius = m * (zs + zp) / 2
-                planet_tip_diameter = m * zp + 2 * m  # d + 2 * addendum
+                carrier_radius = self.carrier_radius
+                planet_tip_diameter = (self.planet.outside_diameter
+                                       if isinstance(self.planet, Gear)
+                                       else m0 * zp + 2 * m0)
                 clearance = (2 * carrier_radius
                              * math.sin(math.pi / self.n_planets))
                 if clearance <= planet_tip_diameter:
@@ -98,6 +119,82 @@ class PlanetaryGearSet:
                         f"Adjacent planets collide: spacing {clearance:.2f} mm"
                         f" <= planet tip diameter {planet_tip_diameter:.2f} mm"
                     )
+
+    def _build_ring_if_needed(self):
+        """Give the set a real internal ring gear when it can be built.
+
+        The kinematics only need tooth counts, but the geometric checks
+        (concentricity, planet adjacency) and any downstream geometry
+        need a ring object. When the sun or the planet is a cylindrical
+        gear and the ring was given as a plain teeth count, build a
+        matching internal :class:`~mecapy.gears.SpurGear` for it.
+        """
+        if isinstance(self.ring, Gear):
+            return
+        template = next((g for g in (self.planet, self.sun)
+                         if isinstance(g, CylindricalGear)), None)
+        if template is None:
+            return
+        self.ring = SpurGear(
+            teeth=int(self.ring),
+            module=template.module,
+            pressure_angle=template.pressure_angle,
+            face_width=template.face_width,
+            internal=True,
+            material=template.material,
+            name=f"{self.name} ring" if self.name else None,
+        )
+
+    def _check_meshes(self):
+        """Run the sun-planet and planet-ring pairs through _check_mesh."""
+        from .transmission import _check_mesh
+
+        if isinstance(self.sun, Gear) and isinstance(self.planet, Gear):
+            _check_mesh(self.sun, self.planet)
+        if isinstance(self.planet, Gear) and isinstance(self.ring, Gear):
+            _check_mesh(self.planet, self.ring)
+
+    def _check_concentricity(self):
+        """Sun-planet and planet-ring working center distances must agree.
+
+        The teeth-only condition ``Zr = Zs + 2 Zp`` is necessary but not
+        sufficient. It is stated on *reference* geometry, which profile
+        shift leaves untouched; what has to line up for the set to
+        assemble is the *working* center distance of both meshes, and a
+        shifted member moves only that. This is the check that catches
+        it.
+        """
+        members = (self.sun, self.planet, self.ring)
+        if not all(isinstance(g, CylindricalGear) for g in members):
+            return
+        a_sp = self.sun.working_center_distance_with(self.planet)
+        a_pr = self.planet.working_center_distance_with(self.ring)
+        if not math.isclose(a_sp, a_pr, rel_tol=1e-6):
+            raise ValueError(
+                f"Concentricity failed: sun-planet working center distance "
+                f"{a_sp:.4f} mm != planet-ring {a_pr:.4f} mm"
+            )
+
+    @property
+    def carrier_radius(self):
+        """float: Carrier (planet orbit) radius in mm.
+
+        The working sun-planet center distance when both are gear
+        objects, else the reference value ``m (Zs + Zp) / 2``.
+
+        Raises:
+            ValueError: If no member carries a module (all plain ints).
+        """
+        if isinstance(self.sun, CylindricalGear) and isinstance(
+                self.planet, CylindricalGear):
+            return self.sun.working_center_distance_with(self.planet)
+        gears = [g for g in (self.sun, self.planet, self.ring)
+                 if isinstance(g, Gear)]
+        if not gears:
+            raise ValueError(
+                "No module available: build the set from gear objects"
+            )
+        return gears[0].module * (self.sun_teeth + self.planet_teeth) / 2
 
     # ------------------------------------------------------------------
     # Teeth counts

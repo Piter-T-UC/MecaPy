@@ -445,3 +445,262 @@ class TestTransmissionAGMA:
         text = t.agma_summary(Qv=8, hardness_HB=300)
         assert "Stage 0" in text and "Stage 1" in text
         assert "Governing bending" in text
+
+
+class TestInternalMeshRules:
+    """_check_mesh acceptance and rejection for internal gears."""
+
+    def test_internal_stage_accepted(self):
+        """A pinion inside a bigger ring is a valid stage."""
+        t = Transmission().add_stage(
+            SpurGear(20, module=2.0),
+            SpurGear(80, module=2.0, internal=True))
+        assert t.overall_ratio == pytest.approx(4.0)
+
+    def test_ring_can_drive(self):
+        """A ring gear may be the driver of its stage."""
+        t = Transmission().add_stage(
+            SpurGear(80, module=2.0, internal=True),
+            SpurGear(20, module=2.0))
+        assert t.overall_ratio == pytest.approx(0.25)
+
+    def test_two_internal_gears_rejected(self):
+        """Two rings have no way to mesh."""
+        with pytest.raises(ValueError, match="Two internal gears"):
+            Transmission().add_stage(
+                SpurGear(80, module=2.0, internal=True),
+                SpurGear(60, module=2.0, internal=True))
+
+    def test_ring_must_be_larger(self):
+        """The internal member must have more teeth than its pinion."""
+        with pytest.raises(ValueError, match="more teeth"):
+            Transmission().add_stage(
+                SpurGear(60, module=2.0),
+                SpurGear(40, module=2.0, internal=True))
+
+    def test_internal_rack_rejected(self):
+        """A ring gear cannot drive a rack."""
+        with pytest.raises(ValueError, match="external cylindrical"):
+            Transmission().add_stage(
+                SpurGear(80, module=2.0, internal=True),
+                Rack(module=2.0))
+
+    def test_internal_helical_needs_the_same_hand(self):
+        """Opposite hands are the external rule; internal is the same hand."""
+        ring = HelicalGear(80, module=2.0, helix_angle=20.0, hand="right",
+                           internal=True)
+        same = HelicalGear(20, module=2.0, helix_angle=20.0, hand="right")
+        opposite = HelicalGear(20, module=2.0, helix_angle=20.0, hand="left")
+        Transmission().add_stage(same, ring)
+        with pytest.raises(ValueError, match="same hand"):
+            Transmission().add_stage(opposite, ring)
+
+    def test_external_helical_still_needs_opposite_hands(self):
+        """The external rule is unchanged."""
+        right = HelicalGear(20, module=2.0, helix_angle=20.0, hand="right")
+        other = HelicalGear(60, module=2.0, helix_angle=20.0, hand="right")
+        with pytest.raises(ValueError, match="opposite hands"):
+            Transmission().add_stage(right, other)
+
+    def test_center_distance_is_a_difference(self):
+        """An internal stage subtracts the pitch radii."""
+        t = Transmission().add_stage(
+            SpurGear(20, module=2.0),
+            SpurGear(80, module=2.0, internal=True))
+        assert t.center_distance(0) == pytest.approx(60.0)
+
+
+class TestInternalTrainValue:
+    """An internal mesh does not reverse the direction of rotation."""
+
+    def test_single_internal_stage_is_positive(self):
+        """Input and output turn the same way."""
+        t = Transmission().add_stage(
+            SpurGear(20, module=2.0),
+            SpurGear(80, module=2.0, internal=True))
+        assert t.train_value == pytest.approx(0.25)
+
+    def test_single_external_stage_is_negative(self):
+        """The external case is unchanged."""
+        t = Transmission().add_stage(SpurGear(20, module=2.0),
+                                     SpurGear(80, module=2.0))
+        assert t.train_value == pytest.approx(-0.25)
+
+    def test_mixed_train(self):
+        """One external plus one internal mesh reverses once overall."""
+        a = SpurGear(17, module=2.0)
+        b = SpurGear(51, module=2.0)
+        c = SpurGear(18, module=2.5)
+        d = SpurGear(72, module=2.5, internal=True)
+        t = Transmission().add_stage(a, b).add_stage(c, d)
+        assert t.train_value == pytest.approx(-1 / 12)
+
+
+class TestRotationSenses:
+    """Direction of rotation propagated through a train."""
+
+    def test_external_mesh_flips(self):
+        """An external mesh reverses the sense."""
+        t = Transmission().add_stage(SpurGear(20, module=2.0),
+                                     SpurGear(60, module=2.0))
+        assert t.rotation_senses() == [{"driver": 1, "driven": -1}]
+
+    def test_internal_mesh_preserves(self):
+        """An internal mesh keeps the sense."""
+        t = Transmission().add_stage(
+            SpurGear(20, module=2.0),
+            SpurGear(80, module=2.0, internal=True))
+        assert t.rotation_senses() == [{"driver": 1, "driven": 1}]
+
+    def test_input_sense_is_honoured(self):
+        """The input sense flips the whole train, and must be +1 or -1."""
+        t = Transmission().add_stage(SpurGear(20, module=2.0),
+                                     SpurGear(60, module=2.0))
+        assert t.rotation_senses(-1) == [{"driver": -1, "driven": 1}]
+        with pytest.raises(ValueError, match="input_sense"):
+            t.rotation_senses(0)
+
+    def test_idler_train_agrees_with_train_value(self):
+        """Two external meshes bring the output back to the input sense."""
+        first = SpurGear(20, module=2.0)
+        idler = SpurGear(30, module=2.0)
+        last = SpurGear(60, module=2.0)
+        t = Transmission().add_stage(first, idler).add_stage(idler, last)
+        senses = t.rotation_senses()
+        assert senses[-1]["driven"] == 1
+        assert t.train_value > 0
+
+    def test_rack_has_no_rotation(self):
+        """A rack translates, so its sense is None."""
+        t = Transmission().add_stage(SpurGear(20, module=2.0),
+                                     Rack(module=2.0))
+        assert t.rotation_senses() == [{"driver": 1, "driven": None}]
+
+    def test_bevel_train_rejected(self):
+        """Intersecting axes have no single sense in the drawing plane."""
+        t = Transmission().add_stage(BevelGear(20, module=2.0),
+                                     BevelGear(40, module=2.0))
+        with pytest.raises(ValueError, match="parallel-axis"):
+            t.rotation_senses()
+
+
+class TestStageLayout:
+    """Drawing geometry, computed without matplotlib."""
+
+    def test_centers_advance_by_the_center_distance(self):
+        """Gears are laid out along +x, one center distance apart."""
+        t = Transmission().add_stage(SpurGear(20, module=2.0),
+                                     SpurGear(60, module=2.0))
+        layout = t.stage_layout()
+        assert [item["center"] for item in layout] == [(0.0, 0.0), (80.0, 0.0)]
+
+    def test_compound_stages_are_coaxial(self):
+        """A stage driver shares its shaft with the previous driven gear."""
+        a = SpurGear(17, module=2.0)
+        b = SpurGear(51, module=2.0)
+        c = SpurGear(18, module=2.5)
+        d = SpurGear(72, module=2.5)
+        t = Transmission().add_stage(a, b).add_stage(c, d)
+        centers = {id(item["element"]): item["center"]
+                   for item in t.stage_layout()}
+        assert centers[id(b)] == centers[id(c)]
+        assert centers[id(d)][0] == pytest.approx(68.0 + 112.5)
+
+    def test_internal_stage_places_the_pinion_inside(self):
+        """The centers are only a difference of radii apart."""
+        pinion = SpurGear(20, module=2.0)
+        ring = SpurGear(80, module=2.0, internal=True)
+        layout = Transmission().add_stage(pinion, ring).stage_layout()
+        assert layout[1]["center"] == (60.0, 0.0)
+        assert layout[1]["center"][0] < ring.outside_radius
+
+    def test_idler_appears_once(self):
+        """A reused gear object is one body, not two."""
+        first = SpurGear(20, module=2.0)
+        idler = SpurGear(30, module=2.0)
+        last = SpurGear(60, module=2.0)
+        t = Transmission().add_stage(first, idler).add_stage(idler, last)
+        layout = t.stage_layout()
+        assert len(layout) == 3
+        assert [item["element"] for item in layout] == [first, idler, last]
+
+    def test_speeds_and_senses_are_reported(self):
+        """Speeds propagate from the given input speed."""
+        t = Transmission().add_stage(SpurGear(20, module=2.0),
+                                     SpurGear(60, module=2.0))
+        layout = t.stage_layout(input_speed_rpm=1800.0)
+        assert layout[0]["speed_rpm"] == pytest.approx(1800.0)
+        assert layout[1]["speed_rpm"] == pytest.approx(600.0)
+        assert layout[1]["sense"] == -1
+
+    def test_speeds_fall_back_to_the_gears(self):
+        """Propagated speeds are used when no input speed is passed."""
+        t = Transmission().add_stage(
+            SpurGear(20, module=2.0, speed_rpm=1800.0, power_kw=5.0),
+            SpurGear(60, module=2.0))
+        layout = t.stage_layout()
+        assert layout[1]["speed_rpm"] == pytest.approx(600.0)
+
+    def test_rack_sits_under_its_pinion(self):
+        """The rack pitch line is tangent to the pinion pitch circle."""
+        pinion = SpurGear(20, module=2.0)
+        t = Transmission().add_stage(pinion, Rack(module=2.0, length=100))
+        layout = t.stage_layout()
+        assert layout[1]["center"] == (0.0, -pinion.pitch_radius)
+
+
+class TestTransmissionPlot:
+    """Smoke tests: plot() returns a matplotlib Figure."""
+
+    @pytest.fixture(autouse=True)
+    def _matplotlib(self):
+        matplotlib = pytest.importorskip("matplotlib")
+        matplotlib.use("Agg")
+        yield
+        matplotlib.pyplot.close("all")
+
+    def test_external_train(self):
+        """A two-stage external train draws."""
+        from matplotlib.figure import Figure
+        t = Transmission(name="two stage").add_stage(
+            SpurGear(17, module=2.0, speed_rpm=1500.0, power_kw=5.0),
+            SpurGear(51, module=2.0))
+        assert isinstance(t.plot(show=False), Figure)
+
+    def test_internal_train(self):
+        """A pinion in a ring draws."""
+        from matplotlib.figure import Figure
+        t = Transmission().add_stage(
+            SpurGear(20, module=2.0),
+            SpurGear(80, module=2.0, internal=True))
+        assert isinstance(t.plot(show=False, input_speed_rpm=1200.0), Figure)
+
+    def test_labels_can_be_switched_off(self):
+        """labels=False drops the annotations."""
+        t = Transmission().add_stage(SpurGear(20, module=2.0),
+                                     SpurGear(60, module=2.0))
+        with_labels = t.plot(show=False, labels=True)
+        without = t.plot(show=False, labels=False)
+        assert len(with_labels.axes[0].texts) > len(without.axes[0].texts)
+
+    def test_rack_train(self):
+        """A rack and pinion draws."""
+        from matplotlib.figure import Figure
+        t = Transmission().add_stage(SpurGear(20, module=2.0),
+                                     Rack(module=2.0, length=120))
+        assert isinstance(t.plot(show=False), Figure)
+
+    def test_bevel_train_rejected(self):
+        """Intersecting axes cannot be drawn in a plan view."""
+        t = Transmission().add_stage(BevelGear(20, module=2.0),
+                                     BevelGear(40, module=2.0))
+        with pytest.raises(ValueError, match="parallel-axis"):
+            t.plot(show=False)
+
+    def test_reuses_a_given_axes(self):
+        """Passing ax= draws into that figure."""
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots()
+        t = Transmission().add_stage(SpurGear(20, module=2.0),
+                                     SpurGear(60, module=2.0))
+        assert t.plot(show=False, ax=ax) is fig

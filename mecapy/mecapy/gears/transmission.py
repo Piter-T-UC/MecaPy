@@ -19,6 +19,15 @@ from .gear import Gear
 from .rack import Rack
 from .worm import Worm, WormWheel
 
+#: Outer body radius of an internal gear in :meth:`Transmission.plot`,
+#: as a multiple of its root radius. Purely cosmetic — the rim thickness
+#: of a real ring gear is a design choice, not a geometric consequence.
+_RIM_FACTOR = 1.15
+
+#: Vertical offset in points between the labels of two gears that share
+#: a shaft (and therefore a center) in :meth:`Transmission.plot`.
+_LABEL_STACK_POINTS = 24
+
 
 def _check_mesh(driver, driven):
     """
@@ -29,6 +38,11 @@ def _check_mesh(driver, driven):
     helical, axial for a worm) and equal pressure angle. Profile shift
     does not affect mesh compatibility (it only moves the working
     center distance).
+
+    An internal (ring) gear meshes only with an external cylindrical
+    gear of fewer teeth; two internal gears cannot mesh, and an
+    internal helical mesh needs the *same* hand on both members rather
+    than opposite hands.
 
     Args:
         driver: Driving element (Gear subclass or Worm).
@@ -42,6 +56,25 @@ def _check_mesh(driver, driven):
         raise ValueError("A rack cannot be a driving element")
     if isinstance(driven, Worm):
         raise ValueError("A worm cannot be a driven element")
+
+    # --- internal (ring) gear rules, whatever the cylindrical family ---
+    if getattr(driver, "internal", False) or getattr(driven, "internal",
+                                                     False):
+        if getattr(driver, "internal", False) and getattr(driven, "internal",
+                                                          False):
+            raise ValueError("Two internal gears cannot mesh")
+        ring, pinion = ((driver, driven) if getattr(driver, "internal", False)
+                        else (driven, driver))
+        if not isinstance(pinion, CylindricalGear):
+            raise ValueError(
+                f"An internal gear meshes only with an external "
+                f"cylindrical gear, not {type(pinion).__name__}"
+            )
+        if ring.teeth <= pinion.teeth:
+            raise ValueError(
+                f"An internal gear must have more teeth than its pinion: "
+                f"{ring.teeth} vs {pinion.teeth}"
+            )
 
     if isinstance(driver, Worm):
         if not isinstance(driven, WormWheel):
@@ -79,8 +112,18 @@ def _check_mesh(driver, driven):
                 raise ValueError(
                     "Meshing helical gears need equal helix angles"
                 )
-            if driver.hand == driven.hand or None in (driver.hand,
-                                                      driven.hand):
+            if None in (driver.hand, driven.hand):
+                raise ValueError(
+                    "Meshing helical gears both need a hand "
+                    "('right' or 'left')"
+                )
+            if driver.internal or driven.internal:
+                if driver.hand != driven.hand:
+                    raise ValueError(
+                        "Internal helical gears mesh with the same hand "
+                        "(both 'right' or both 'left')"
+                    )
+            elif driver.hand == driven.hand:
                 raise ValueError(
                     "External helical gears mesh with opposite hands "
                     "(one 'right', one 'left')"
@@ -111,7 +154,9 @@ def _stage_pinion(driver, driven):
 
     :class:`~mecapy.gears.agma.AGMARating` requires the pinion to be the
     smaller member, so a speed-increasing stage (driven smaller than the
-    driver) is swapped. A rack is always the mating member.
+    driver) is swapped. A rack is always the mating member. On an
+    internal mesh the external member is always the pinion, whichever
+    side drives.
 
     Args:
         driver: Driving element of the stage.
@@ -127,6 +172,10 @@ def _stage_pinion(driver, driven):
         return (driver, driven)
     if not isinstance(driven, CylindricalGear):
         return None
+    if driver.internal:
+        return (driven, driver)
+    if driven.internal:
+        return (driver, driven)
     if driven.teeth < driver.teeth:
         return (driven, driver)
     return (driver, driven)
@@ -294,8 +343,10 @@ class Transmission:
     def train_value(self):
         """float: Signed train value (output speed / input speed) for
         parallel-axis trains. Each external cylindrical mesh reverses
-        the direction (negative sign). None if the train contains
-        bevel or worm stages (axis changes) or ends in a rack.
+        the direction (negative sign); an internal mesh preserves it
+        (positive sign), because the pinion runs inside the ring. None
+        if the train contains bevel or worm stages (axis changes) or
+        ends in a rack.
         """
         self._require_stages()
         value = 1.0
@@ -303,7 +354,8 @@ class Transmission:
             if isinstance(driver, (Worm, BevelGear)) or isinstance(
                     driven, (Rack, BevelGear, WormWheel)):
                 return None
-            value *= -driver.teeth / driven.teeth
+            sign = 1.0 if (driver.internal or driven.internal) else -1.0
+            value *= sign * driver.teeth / driven.teeth
         return value
 
     def output_speed(self, input_speed_rpm):
@@ -408,6 +460,9 @@ class Transmission:
         """
         Center distance of one stage (parallel-axis or worm stages).
 
+        The pitch diameters add for an external mesh and subtract for an
+        internal one (ring minus pinion).
+
         Args:
             stage_index (int): Zero-based stage index.
 
@@ -422,6 +477,9 @@ class Transmission:
             raise ValueError("A rack stage has no center distance")
         if isinstance(driver, BevelGear):
             raise ValueError("A bevel stage has intersecting axes")
+        if getattr(driver, "internal", False) or getattr(driven, "internal",
+                                                         False):
+            return abs(driver.pitch_diameter - driven.pitch_diameter) / 2
         return (getattr(driver, "pitch_diameter")
                 + driven.pitch_diameter) / 2
 
@@ -742,6 +800,360 @@ class Transmission:
                 f"and Sc >= {max(r.required_Sc() for r in ratings):.1f} MPa",
             ]
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Direction, layout and visualization
+    # ------------------------------------------------------------------
+
+    def _reject_non_parallel(self, feature):
+        """Raise for stages whose axes are not parallel to the drawing."""
+        for i, (driver, driven) in enumerate(self.stages):
+            if isinstance(driver, (Worm, BevelGear)) or isinstance(
+                    driven, (BevelGear, WormWheel)):
+                raise ValueError(
+                    f"{feature} covers parallel-axis trains only; stage {i} "
+                    f"({type(driver).__name__}/{type(driven).__name__}) "
+                    f"changes the axis direction"
+                )
+
+    def rotation_senses(self, input_sense=1):
+        """
+        Direction of rotation of every element, stage by stage.
+
+        An external cylindrical mesh reverses the direction; an internal
+        (ring) mesh preserves it, because the pinion runs inside the
+        ring. The driver of each stage after the first shares a shaft
+        with the previous driven element, so it inherits its sense.
+
+        Args:
+            input_sense (int): Sense of the first driver, +1 for
+                counter-clockwise (the positive-angle direction) or -1
+                for clockwise (default: +1).
+
+        Returns:
+            list: One dict per stage with keys ``"driver"`` and
+            ``"driven"``, each +1 or -1. A rack has no rotation, so its
+            ``"driven"`` entry is None.
+
+        Raises:
+            ValueError: If the train has no stages, ``input_sense`` is
+                not +1 or -1, or a stage changes the axis direction
+                (bevel or worm).
+        """
+        self._require_stages()
+        if input_sense not in (1, -1):
+            raise ValueError("input_sense must be +1 or -1")
+        self._reject_non_parallel("rotation_senses")
+        senses = []
+        sense = int(input_sense)
+        for driver, driven in self.stages:
+            if isinstance(driven, Rack):
+                senses.append({"driver": sense, "driven": None})
+                continue
+            internal = (getattr(driver, "internal", False)
+                        or getattr(driven, "internal", False))
+            driven_sense = sense if internal else -sense
+            senses.append({"driver": sense, "driven": driven_sense})
+            sense = driven_sense
+        return senses
+
+    def stage_layout(self, input_speed_rpm=None, input_sense=1):
+        """
+        Positions, rotation senses and speeds of every gear in the train.
+
+        This is the drawing geometry behind :meth:`plot`, returned as
+        plain data so it can be inspected and tested without matplotlib.
+        Gear centers are laid out along the +x axis: the first driver
+        sits at the origin and every driven element is placed one
+        :meth:`center_distance` further along. The driver of the next
+        stage is mounted on the same shaft, so it shares that center —
+        which is also why a compound train laid out this way never
+        overlaps itself. On an internal stage the center distance is the
+        difference of the pitch radii, so the pinion is drawn inside its
+        ring.
+
+        An idler (the same gear object reused as the driven element of
+        one stage and the driver of the next) appears once, not twice.
+
+        Args:
+            input_speed_rpm (float): Speed of the first driver in rpm.
+                Defaults to the speeds already stored on the gears (a
+                :class:`Transmission` propagates these when the first
+                driver has ``speed_rpm`` set).
+            input_sense (int): Sense of the first driver, +1 or -1.
+
+        Returns:
+            list: One dict per gear, in train order, with keys
+            ``"element"``, ``"stage_index"``, ``"role"``
+            (``"driver"``/``"driven"``), ``"center"`` (an ``(x, y)``
+            tuple in mm), ``"sense"`` (+1/-1, None for a rack) and
+            ``"speed_rpm"`` (None when no speed is known).
+
+        Raises:
+            ValueError: If the train has no stages or a stage changes
+                the axis direction (bevel or worm).
+        """
+        self._require_stages()
+        senses = self.rotation_senses(input_sense)
+        speeds = (self.speeds(input_speed_rpm)
+                  if input_speed_rpm is not None else None)
+
+        def _speed(index, key):
+            if speeds is not None:
+                return speeds[index].get(key + "_rpm")
+            element = self.stages[index][0 if key == "driver" else 1]
+            return getattr(element, "speed_rpm", None)
+
+        layout = []
+        x = 0.0
+        for i, (driver, driven) in enumerate(self.stages):
+            if i == 0 or self.stages[i - 1][1] is not driver:
+                layout.append({
+                    "element": driver,
+                    "stage_index": i,
+                    "role": "driver",
+                    "center": (x, 0.0),
+                    "sense": senses[i]["driver"],
+                    "speed_rpm": _speed(i, "driver"),
+                })
+            if isinstance(driven, Rack):
+                # The rack pitch line is tangent to the pinion pitch
+                # circle, below it.
+                center = (x, -driver.pitch_radius)
+            else:
+                x += self.center_distance(i)
+                center = (x, 0.0)
+            layout.append({
+                "element": driven,
+                "stage_index": i,
+                "role": "driven",
+                "center": center,
+                "sense": senses[i]["driven"],
+                "speed_rpm": _speed(i, "driven"),
+            })
+        return layout
+
+    def plot(self, show=True, ax=None, labels=True, input_speed_rpm=None,
+             input_sense=1):
+        """
+        Draw the train to scale, with rotation directions.
+
+        Every gear is drawn at its real size and center distance from
+        :meth:`stage_layout`. An external gear is drawn as its tip
+        circle with a dashed pitch circle and a thin root circle inside;
+        an internal (ring) gear is drawn as a shaded annulus between its
+        root circle (the outer body boundary) and its tip circle, so a
+        pinion running inside a ring reads at a glance. A curved arrow
+        at each center shows the direction of rotation.
+
+        Args:
+            show (bool): Call ``plt.show()`` before returning
+                (default: True).
+            ax (matplotlib.axes.Axes): Axes to draw on. A new figure is
+                created when omitted.
+            labels (bool): Annotate each gear with its tooth count and,
+                when known, its speed (default: True).
+            input_speed_rpm (float): Speed of the first driver in rpm,
+                used for the speed labels. Defaults to the speeds stored
+                on the gears.
+            input_sense (int): Sense of the first driver, +1 or -1.
+
+        Returns:
+            matplotlib.figure.Figure: The figure containing the drawing.
+
+        Raises:
+            ImportError: If matplotlib is not installed.
+            ValueError: If the train has no stages or contains a bevel
+                or worm stage (intersecting or skew axes cannot be drawn
+                in a plan view).
+        """
+        try:
+            import matplotlib.pyplot as plt
+            from matplotlib.patches import Arc, Circle, FancyArrowPatch, \
+                Rectangle
+        except ImportError:
+            raise ImportError(
+                "matplotlib is required for plot; "
+                "install it with 'pip install matplotlib'"
+            )
+
+        layout = self.stage_layout(input_speed_rpm=input_speed_rpm,
+                                   input_sense=input_sense)
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(9, 6))
+        else:
+            fig = ax.figure
+
+        # Draw the biggest bodies first so a pinion inside a ring, or a
+        # small gear coaxial with a big one, stays visible.
+        order = sorted(range(len(layout)),
+                       key=lambda i: -self._drawn_radius(layout[i]["element"]))
+        # Gears on a common shaft share a center: anchor all of their
+        # labels below the largest of them, then stack them.
+        anchors = {}
+        for item in layout:
+            r = self._drawn_radius(item["element"])
+            anchors[item["center"]] = max(anchors.get(item["center"], 0.0), r)
+        shared = {}
+        for i in order:
+            item = layout[i]
+            element = item["element"]
+            cx, cy = item["center"]
+            if isinstance(element, Rack):
+                self._draw_rack(ax, element, cx, cy, Rectangle)
+            elif element.internal:
+                self._draw_internal_gear(ax, element, cx, cy, Circle)
+            else:
+                self._draw_external_gear(ax, element, cx, cy, Circle)
+            if item["sense"] is not None:
+                self._draw_rotation_arrow(ax, element, cx, cy, item["sense"],
+                                          Arc, FancyArrowPatch)
+            if labels:
+                level = shared.get(item["center"], 0)
+                shared[item["center"]] = level + 1
+                self._draw_label(ax, item, cx, cy,
+                                 anchors[item["center"]], level)
+
+        ax.set_xlabel("x [mm]")
+        ax.set_ylabel("y [mm]")
+        # "box" rather than "datalim": the limits below are chosen to
+        # fit the drawing, so the axes box adapts to them, not vice versa.
+        ax.set_aspect("equal", adjustable="box")
+        ax.grid(True, color="#e5e7eb", linewidth=0.8)
+        ax.set_axisbelow(True)
+        self._set_limits(ax, layout, labels)
+        title = self.name or "Transmission"
+        try:
+            title += f" - overall ratio {self.overall_ratio:.3f}"
+        except ValueError:
+            pass
+        ax.set_title(title)
+        if show:
+            plt.show()
+        return fig
+
+    @staticmethod
+    def _draw_external_gear(ax, gear, cx, cy, Circle):
+        """Tip circle, dashed pitch circle, thin root circle and hub."""
+        ax.add_patch(Circle((cx, cy), gear.outside_radius, fill=True,
+                            facecolor="#dbeafe", edgecolor="#1d4ed8",
+                            linewidth=1.6, zorder=2))
+        ax.add_patch(Circle((cx, cy), gear.pitch_radius, fill=False,
+                            edgecolor="#1d4ed8", linewidth=1.0,
+                            linestyle="--", zorder=3))
+        ax.add_patch(Circle((cx, cy), gear.root_radius, fill=False,
+                            edgecolor="#93c5fd", linewidth=0.8, zorder=3))
+        ax.plot([cx], [cy], marker="o", color="#1d4ed8", markersize=4,
+                zorder=4)
+
+    @staticmethod
+    def _draw_internal_gear(ax, gear, cx, cy, Circle):
+        """Rim body plus the shaded tooth annulus, tip circle innermost."""
+        ax.add_patch(Circle((cx, cy), _RIM_FACTOR * gear.root_radius,
+                            fill=True, facecolor="#fee2e2",
+                            edgecolor="#b91c1c", linewidth=1.6, zorder=1))
+        ax.add_patch(Circle((cx, cy), gear.root_radius, fill=True,
+                            facecolor="#fca5a5", edgecolor="#b91c1c",
+                            linewidth=1.0, zorder=1))
+        ax.add_patch(Circle((cx, cy), gear.outside_radius, fill=True,
+                            facecolor="white", edgecolor="#b91c1c",
+                            linewidth=1.6, zorder=1))
+        ax.add_patch(Circle((cx, cy), gear.pitch_radius, fill=False,
+                            edgecolor="#b91c1c", linewidth=1.0,
+                            linestyle="--", zorder=1))
+        ax.plot([cx], [cy], marker="+", color="#b91c1c", markersize=6,
+                zorder=4)
+
+    @staticmethod
+    def _draw_rack(ax, rack, cx, cy, Rectangle):
+        """Rack body along its pitch line, tangent to the pinion."""
+        length = rack.length if rack.length else 10 * rack.circular_pitch
+        height = rack.addendum + rack.dedendum
+        ax.add_patch(Rectangle((cx - length / 2, cy - height), length, height,
+                               facecolor="#dbeafe", edgecolor="#1d4ed8",
+                               linewidth=1.6, zorder=2))
+        ax.plot([cx - length / 2, cx + length / 2], [cy, cy],
+                color="#1d4ed8", linewidth=1.0, linestyle="--", zorder=3)
+
+    @staticmethod
+    def _draw_rotation_arrow(ax, gear, cx, cy, sense, Arc, FancyArrowPatch):
+        """Curved arrow showing the rotation sense.
+
+        An external gear gets a wide arc around its center. An internal
+        gear gets a short arc on its rim instead, so the arrow does not
+        fill the bore where the pinion runs.
+        """
+        color = "#b91c1c" if gear.internal else "#1d4ed8"
+        if gear.internal:
+            r = (gear.root_radius + _RIM_FACTOR * gear.root_radius) / 2
+            start, end = 60.0, 120.0
+        else:
+            r = 0.45 * gear.outside_radius
+            start, end = 30.0, 300.0
+        if r <= 0:
+            return
+        ax.add_patch(Arc((cx, cy), 2 * r, 2 * r, theta1=start, theta2=end,
+                         edgecolor=color, linewidth=1.4, zorder=5))
+        # Arrow head tangent to the arc, at whichever end the gear turns
+        # towards: the arc runs counter-clockwise from start to end.
+        head, back = (end, end - 10.0) if sense > 0 else (start, start + 10.0)
+        ax.add_patch(FancyArrowPatch(
+            (cx + r * math.cos(math.radians(back)),
+             cy + r * math.sin(math.radians(back))),
+            (cx + r * math.cos(math.radians(head)),
+             cy + r * math.sin(math.radians(head))),
+            arrowstyle="-|>", mutation_scale=12, color=color, zorder=5))
+
+    @staticmethod
+    def _drawn_radius(element):
+        """float: Outer radius of an element as drawn, in mm."""
+        if isinstance(element, Rack):
+            return element.addendum + element.dedendum
+        if element.internal:
+            return _RIM_FACTOR * element.root_radius
+        return element.outside_radius
+
+    def _draw_label(self, ax, item, cx, cy, anchor_radius, level=0):
+        """Tooth count and speed beside or beneath the element.
+
+        ``anchor_radius`` is the largest drawn radius on this shaft and
+        ``level`` stacks the labels of gears that share it.
+        """
+        element = item["element"]
+        if isinstance(element, Rack):
+            # A rack sits under its pinion, so label its left end
+            # instead of stacking under the shared pitch point.
+            length = element.length or 10 * element.circular_pitch
+            ax.annotate("rack", (cx - length / 2, cy),
+                        textcoords="offset points", xytext=(4, -14),
+                        ha="left", va="top", fontsize=8, zorder=6)
+            return
+        parts = [f"{element.teeth}t"
+                 + (" internal" if element.internal else "")]
+        if item["speed_rpm"] is not None:
+            parts.append(f"{item['speed_rpm']:.0f} rpm")
+        ax.annotate("\n".join(parts), (cx, cy - anchor_radius),
+                    textcoords="offset points",
+                    xytext=(0, -12 - level * _LABEL_STACK_POINTS),
+                    ha="center", va="top", fontsize=8, zorder=6)
+
+    def _set_limits(self, ax, layout, labels):
+        """Fit the axes around the drawn bodies, leaving room for labels."""
+        xs, ys = [], []
+        for item in layout:
+            cx, cy = item["center"]
+            r = self._drawn_radius(item["element"])
+            if isinstance(item["element"], Rack):
+                length = (item["element"].length
+                          or 10 * item["element"].circular_pitch)
+                xs += [cx - length / 2, cx + length / 2]
+                ys += [cy - r, cy]
+            else:
+                xs += [cx - r, cx + r]
+                ys += [cy - r, cy + r]
+        pad = 0.08 * max(max(xs) - min(xs), max(ys) - min(ys), 1.0)
+        ax.set_xlim(min(xs) - pad, max(xs) + pad)
+        ax.set_ylim(min(ys) - pad * (3.0 if labels else 1.0), max(ys) + pad)
 
     def _require_stages(self):
         if not self.stages:
