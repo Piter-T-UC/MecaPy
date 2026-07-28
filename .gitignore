@@ -137,3 +137,7 @@ graphify-out/
 
 # Personal scratch scripts (not for the repo)
 sandbox/
+
+# Staged at build time by .github/workflows/publish.yml (canonical copies live at the repo root)
+mecapy/README.md
+mecapy/LICENSE

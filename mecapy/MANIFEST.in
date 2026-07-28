@@ -1,0 +1,9 @@
+# README.md and LICENSE live at the repository root, one level above this
+# project directory. The publish workflow copies them in before building so
+# they end up in the sdist (and therefore in the wheel built from it).
+include README.md
+include LICENSE
+include setup.cfg
+recursive-include tests *.py
+prune sandbox
+prune docs/_build

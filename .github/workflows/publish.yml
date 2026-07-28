@@ -1,0 +1,74 @@
+name: Publish to PyPI
+
+# Publishes a release to PyPI via Trusted Publishing (OIDC) — no API token needed.
+# Triggered by pushing a version tag, e.g.:
+#   git tag v0.1.0 && git push origin v0.1.0
+# The workflow_dispatch entry lets you re-run it by hand from the Actions tab.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+defaults:
+  run:
+    # The Python project lives in the mecapy/ subdirectory of this repo.
+    working-directory: mecapy
+
+jobs:
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+
+      # README.md and LICENSE live at the repo root, outside this project
+      # directory, so setuptools cannot pack them into the sdist from there.
+      # `python -m build` builds the wheel from the extracted sdist, so without
+      # this copy the long_description silently falls back to a one-liner.
+      - name: Stage root README and LICENSE into the project directory
+        run: cp ../README.md ../LICENSE .
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Check metadata
+        run: twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: mecapy/dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # This environment name must match the one registered in the PyPI
+    # trusted publisher settings.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/mecapy
+    permissions:
+      # Required for Trusted Publishing: mints the short-lived OIDC token.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
