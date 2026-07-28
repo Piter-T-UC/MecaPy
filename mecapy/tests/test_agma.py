@@ -492,3 +492,81 @@ class TestGearMaterial:
         assert r.has_allowables is False
         with pytest.raises(ValueError, match="hardness_HB"):
             _ = r.SF_pinion
+
+
+class TestInternalMeshRating:
+    """AGMA rating with an internal (ring) gear as the mating member.
+
+    These ratings are approximate (the J tables are external-tooth
+    data); what is checked here is the internal contact geometry and
+    the guards around it.
+    """
+
+    def test_internal_geometry_factor_is_larger(self):
+        """A concave ring flank lowers the contact stress."""
+        pinion = SpurGear(20, module=2.0, face_width=25.0)
+        external = SpurGear(80, module=2.0, face_width=25.0)
+        ring = SpurGear(80, module=2.0, face_width=25.0, internal=True)
+        assert (agma.geometry_factor_I(pinion, ring)
+                > agma.geometry_factor_I(pinion, external))
+
+    def test_matches_the_pitch_point_closed_form(self):
+        """I_internal / I_external tends to (mG + 1) / (mG - 1).
+
+        The implementation samples the curvature one base pitch inside
+        the pinion tip, so the closed-form ratio is only reached in the
+        pitch-point limit — approached here with a very large pinion,
+        for which that offset is negligible.
+        """
+        pinion = SpurGear(1000, module=1.0, face_width=25.0)
+        external = SpurGear(3000, module=1.0, face_width=25.0)
+        ring = SpurGear(3000, module=1.0, face_width=25.0, internal=True)
+        ratio = (agma.geometry_factor_I(pinion, ring)
+                 / agma.geometry_factor_I(pinion, external))
+        mG = 3.0
+        assert ratio == pytest.approx((mG + 1) / (mG - 1), rel=1e-3)
+
+    def test_rating_is_finite_and_gentler_than_external(self):
+        """The same load in a ring gives a higher contact safety factor."""
+        pinion = SpurGear(20, module=2.0, face_width=25.0)
+        ring = SpurGear(80, module=2.0, face_width=25.0, internal=True)
+        external = SpurGear(80, module=2.0, face_width=25.0)
+        internal_rating = AGMARating(pinion, ring, power_kw=5.0,
+                                     pinion_speed_rpm=1200.0,
+                                     hardness_HB=250)
+        external_rating = AGMARating(pinion, external, power_kw=5.0,
+                                     pinion_speed_rpm=1200.0,
+                                     hardness_HB=250)
+        assert internal_rating.SH > external_rating.SH
+        assert internal_rating.SF_pinion > 0
+        assert internal_rating.SF_gear > 0
+
+    def test_hardness_ratio_factor_is_one(self):
+        """ZW is defined for external meshes only."""
+        pinion = SpurGear(20, module=2.0, face_width=25.0)
+        ring = SpurGear(80, module=2.0, face_width=25.0, internal=True)
+        rating = AGMARating(pinion, ring, power_kw=5.0,
+                            pinion_speed_rpm=1200.0, hardness_HB=300,
+                            gear_hardness_HB=200)
+        assert rating.is_internal_mesh is True
+        assert rating.ZW == 1.0
+
+    def test_ring_cannot_be_the_pinion(self):
+        """The first argument must be the external member."""
+        pinion = SpurGear(20, module=2.0, face_width=25.0)
+        ring = SpurGear(80, module=2.0, face_width=25.0, internal=True)
+        with pytest.raises(ValueError, match="external member"):
+            AGMARating(ring, pinion, power_kw=5.0, pinion_speed_rpm=300.0)
+
+    def test_train_rating_orders_the_stage(self):
+        """rate_agma picks the external member as the pinion either way."""
+        from mecapy.gears import Transmission
+
+        ring = SpurGear(80, module=2.0, face_width=25.0, internal=True,
+                        speed_rpm=300.0, power_kw=5.0)
+        pinion = SpurGear(20, module=2.0, face_width=25.0)
+        ratings = Transmission().add_stage(ring, pinion).rate_agma(
+            hardness_HB=250)
+        assert len(ratings) == 1
+        assert ratings[0].pinion is pinion
+        assert ratings[0].gear is ring

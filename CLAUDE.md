@@ -156,6 +156,19 @@ through `mecapy/materials.py` (`get_material_properties`, `get_available_materia
   `working_pressure_angle_with()`, `working_center_distance_with()` and
   `has_interference_with()` handle shifted meshes (`center_distance_with()` stays the
   reference distance). AGMA tables assume x = 0 (ratings for shifted gears are approximate).
+- **Internal (ring) gears** (cylindrical gears only): pass `internal=True`. `Gear`
+  carries a class attribute `internal = False` and a `_sign` property; the three
+  sign-dependent properties (`outside_diameter`, `root_diameter`, `tooth_thickness`)
+  are written in terms of it, so `Rack`/`BevelGear`/`Worm` are untouched. On a ring
+  gear `da < d < df` — addendum and dedendum keep their magnitudes, only their
+  direction flips. Every pair method routes its sign convention through the single
+  helper `_mesh_terms(a, b)` in `cylindrical.py`: the external sums `z1+z2`, `x1+x2`,
+  `(d1+d2)/2` become ring-minus-pinion differences. Undercut does not apply
+  (`is_undercut` is False, `min_profile_shift` raises); the internal failure mode is
+  `has_trimming_interference_with()`, a minimum-tooth-difference rule. `_check_mesh`
+  rejects int+int, requires `z_int > z_ext`, and needs the **same** helix hand where
+  an external mesh needs opposite hands. An internal mesh does not reverse rotation,
+  so `train_value` takes a `+` sign for it.
 - **`CylindricalGear`** family:
   - **`SpurGear`** — parallel axes, no helix angle
   - **`HelicalGear`** — parallel axes with helix angle (requires hand: "right"/"left")
@@ -169,11 +182,28 @@ through `mecapy/materials.py` (`get_material_properties`, `get_available_materia
   - Terminal member of a transmission (cannot drive, only be driven)
 - **`PlanetaryGearSet`** — composite of sun/planet/ring
   - Solves via Willis train-value equation
+  - The ring is a real internal gear: a gear object passed as the ring must have
+    `internal=True`, and a plain teeth count is built into a matching internal
+    `SpurGear`. Beyond the teeth rule `Zr = Zs + 2 Zp` it checks the sun-planet and
+    planet-ring **working** center distances against each other (`_check_concentricity`,
+    which is what catches a profile-shifted set the teeth rule waves through), runs both
+    meshes through `_check_mesh`, and uses the planet's real `outside_diameter` for the
+    adjacency check. `carrier_radius` exposes the planet orbit radius
   - Not a `Transmission` stage (three members, not two)
 - **`Transmission`** — chains 2+ meshes together
   - Single source of truth for mesh compatibility (`_check_mesh()`)
   - Kinematic model: speed ratios, output torque/power
   - Reused by AGMA rating and other pair methods
+  - Direction and layout: `rotation_senses(input_sense=1)` gives +1/-1 per element
+    (external mesh flips, internal preserves, rack is None); `stage_layout()` returns
+    the drawing geometry as plain dicts (element, center, sense, speed) — gears laid
+    out along +x, each stage's driver coaxial with the previous driven gear, idlers
+    emitted once. Both raise for bevel/worm stages (axis change) and need no matplotlib,
+    so they are testable in CI
+  - `plot(show=True, ax=None, labels=True, input_speed_rpm=None, input_sense=1)` draws
+    the train to scale — external gears as tip/pitch/root circles, ring gears as a
+    shaded annulus, curved arrows for rotation. matplotlib is imported lazily inside
+    the method (optional `viz` extra), returns the `Figure`
   - Train-level AGMA: `rate_agma(stage_kwargs=None, **kwargs)` returns one
     `AGMARating` per cylindrical stage (each tagged with `stage_index`, rated at
     its own propagated speed/power); `agma_governing()` gives the worst SF/SH and
@@ -427,7 +457,8 @@ gear types, mesh compatibility, and rating methods should be independent but coo
 
 ```
 Gear (gear.py) — base, standard involute geometry
-├── CylindricalGear (cylindrical.py) — parallel axes
+├── CylindricalGear (cylindrical.py) — parallel axes; internal=True makes any of
+│   │   these an internal (ring) gear
 │   ├── SpurGear — no helix
 │   ├── HelicalGear — helix_angle + hand ("right"/"left")
 │   └── HerringboneGear(HelicalGear) — hand = None (thrust cancels)
@@ -460,7 +491,10 @@ Transmission (transmission.py) — orchestrates meshes
 
 #### Rating Strategies
 
-**AGMA 2101-D04** (Cylindrical gears only: Spur, Helical, Herringbone, pinion-on-rack)
+**AGMA 2101-D04** (Cylindrical gears only: Spur, Helical, Herringbone, pinion-on-rack,
+and internal meshes — approximately: `geometry_factor_I` uses the concave ring flank
+`rho_g = rho_p + C sin(phi_t)` with subtracting curvature, ZW is forced to 1, and the
+J tables remain external-tooth data. The external member is always the pinion.)
 - Files: `agma.py`, `agma_data.py`
 - Two equations:
   - **Bending:** Lewis stress with geometry factor J, K factors (load, life, reliability)

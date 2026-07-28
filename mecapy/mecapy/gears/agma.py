@@ -16,6 +16,13 @@ with allowable stresses
 Units: N, mm, MPa, m/s. Bevel and worm gears are NOT covered (their
 AGMA formulations differ); see :mod:`mecapy.gears.bevel` and
 :mod:`mecapy.gears.worm` for the simplified checks provided instead.
+
+Internal (ring) meshes reuse the same equations with internal contact
+geometry — the concave ring flank in
+:func:`geometry_factor_I`, ZW forced to 1 — and are **approximate**:
+the J-factor tables are external-tooth data, and AGMA's own internal
+provisions are not implemented. Treat them as design exploration, in
+the same register as the bevel and worm checks.
 """
 
 import math
@@ -216,8 +223,20 @@ def geometry_factor_I(pinion, gear=None):
     handled in the transverse plane (phi_t, mt). A rack flank is
     straight, so ``gear=None`` uses ``1 / rho_g = 0``.
 
+    An internal (ring) gear has a *concave* flank, so its curvature
+    subtracts instead of adding::
+
+        rho_g = rho_p + C sin(phi_t)
+        I = cos(phi_t) / ((1/rho_p - 1/rho_g) dp)
+
+    which reproduces the closed-form
+    ``I = cos(phi_t) sin(phi_t) mG / (2 (mG - 1))`` — larger than the
+    external ``mG / (mG + 1)`` form, i.e. an internal mesh has lower
+    contact stress at the same load, as expected.
+
     Args:
-        pinion (CylindricalGear): The pinion.
+        pinion (CylindricalGear): The pinion — always the external
+            member of an internal mesh.
         gear (CylindricalGear): The mating gear; ``None`` for a pinion
             driving a rack.
 
@@ -226,7 +245,8 @@ def geometry_factor_I(pinion, gear=None):
 
     Raises:
         ValueError: If contact falls below the pinion base circle
-            (rho_p <= 0) or the mesh has tip interference (rho_g <= 0).
+            (rho_p <= 0) or an external mesh has tip interference
+            (rho_g <= 0).
     """
     phi_t = math.radians(pinion.transverse_pressure_angle)
     ra = pinion.outside_radius
@@ -237,16 +257,19 @@ def geometry_factor_I(pinion, gear=None):
         raise ValueError("Pinion contact falls below the base circle "
                          "(rho_p <= 0); too few teeth or undercut")
     if gear is None:
-        inv_rho_g = 0.0
+        curvature = 1.0 / rho_p
+    elif gear.internal:
+        c = pinion.working_center_distance_with(gear)
+        rho_g = rho_p + c * math.sin(phi_t)
+        curvature = 1.0 / rho_p - 1.0 / rho_g
     else:
         c = pinion.working_center_distance_with(gear)
         rho_g = c * math.sin(phi_t) - rho_p
         if rho_g <= 0:
             raise ValueError("Gear flank curvature is non-positive "
                              "(rho_g <= 0); mesh has tip interference")
-        inv_rho_g = 1.0 / rho_g
-    return (math.cos(phi_t)
-            / ((1.0 / rho_p + inv_rho_g) * pinion.pitch_diameter))
+        curvature = 1.0 / rho_p + 1.0 / rho_g
+    return math.cos(phi_t) / (curvature * pinion.pitch_diameter)
 
 
 def bending_life_factor(cycles=1e7):
@@ -417,7 +440,10 @@ class AGMARating:
                 Give a number to override the table.
             ZR (float): Surface-condition factor (default 1.0).
             KB (float): Rim-thickness factor (default 1.0, solid gear);
-                see :func:`rim_thickness_factor`.
+                see :func:`rim_thickness_factor`. Always caller-supplied;
+                on a ring gear the backup ratio is measured on the rim
+                *outside* the root circle, which is a design choice this
+                class has no way to know.
             Ki_pinion (float): Idler bending factor for the pinion member
                 (default 1.0). An idler tooth is loaded on both flanks
                 each revolution (fully reversed bending instead of
@@ -494,6 +520,11 @@ class AGMARating:
             )
         if temperature_celsius is not None:
             temperature_factor = _temperature_factor_from_temp(temperature_celsius)
+        if pinion.internal:
+            raise ValueError(
+                "The pinion (first argument) must be the external member; "
+                "pass the internal (ring) gear as 'gear'"
+            )
         if not isinstance(gear, Rack) and gear.teeth < pinion.teeth:
             raise ValueError(
                 "The pinion must be the smaller member (gear ratio >= 1)"
@@ -670,8 +701,19 @@ class AGMARating:
         return None
 
     @property
+    def is_internal_mesh(self):
+        """bool: Whether the mating member is an internal (ring) gear."""
+        return bool(getattr(self.gear, "internal", False))
+
+    @property
     def ZW(self):
-        """float: Hardness-ratio factor ZW (1.0 unless both hardnesses set)."""
+        """float: Hardness-ratio factor ZW (1.0 unless both hardnesses set).
+
+        AGMA defines ZW for external meshes only, so it is forced to 1.0
+        on an internal mesh.
+        """
+        if self.is_internal_mesh:
+            return 1.0
         ph, gh = self._hardness, self._gear_hardness
         if ph is not None and gh is not None:
             return hardness_ratio_factor(ph, gh, self.gear_ratio)
@@ -914,7 +956,7 @@ class AGMARating:
         if safety_factor <= 0:
             raise ValueError("Safety factor must be strictly positive")
         unit_Sc = (self.contact_stress * self.temperature_factor
-                  * self.YZ / (self.ZN * self.ZW))
+                   * self.YZ / (self.ZN * self.ZW))
         min_Sc = safety_factor * unit_Sc
         if max_safety_factor is None:
             return min_Sc
