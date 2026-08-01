@@ -82,7 +82,10 @@ MechaElement                              # material_properties, calculate_stres
 ├── Gear (gears/)                         # base gear geometry; see gear type hierarchy below
 ├── Wheel (wheels/)                       # pulleys, sprockets; + moment_of_inertia, kinetic_energy
 │   └── Flywheel (wheels/flywheel.py)     # energy fluctuation sizing, rotating-disc stresses (SI)
-├── Bearing (bearings/)                   # rolling contact stress & life
+├── Bearing (bearings/)                   # rolling contact: Shigley ch.11 life + ISO 281/76
+├── JournalBearing (bearings/journal.py)  # hydrodynamic plain journal (Shigley ch.12)
+├── PlainBearing (bearings/plain.py)      # boundary-lubricated bushing, PV limits
+├── ThrustBearing (bearings/thrust.py)    # fixed-incline (tapered-land) thrust pad
 ├── Bolt (bolts/)                         # ISO metric: tension, preload, stiffness
 │   └── BoltedUnion (bolts/)              # joint: load distribution, preload chain, member checks
 ├── AxialFrictionInterface (clutches/)    # annular friction math: uniform pressure & uniform wear
@@ -285,6 +288,61 @@ through `mecapy/materials.py` (`get_material_properties`, `get_available_materia
 - **`Wheel`** — base rotating member with inertia & stress
   - Rim stresses under centrifugal loading
   - Moment of inertia calculation
+
+### Bearings (`mecapy/bearings/`)
+**Purpose:** four bearing families, each with its own governing model. Five data
+modules back them: `bearing_data.py` (Shigley ch. 11), `iso281_data.py`
+(ISO 281/76), `lubrication_data.py` (SAE viscosity + Raimondi-Boyd charts) and
+`bushing_data.py` (Shigley Table 12-8).
+
+**Two speed conventions coexist, deliberately** — rolling bearings take **rpm**
+(the catalog convention), journal/bushing/thrust take **rev/s** (the Sommerfeld
+convention). Every dimensional input also accepts a `pint.Quantity` via
+`utils/units.to_magnitude`, which sidesteps the question.
+
+- **`Bearing`** (`bearing.py`) — rolling contact. Carries **two life models on
+  purpose**: `life`/`adjusted_life`/`required_C10` are Shigley's 3-parameter
+  Weibull, `iso_life` is ISO 281 `L_nm = a1*a_ISO*L10`. They use different
+  reliability conventions and will not agree numerically — do not "reconcile"
+  them. Also `static_safety_factor` (ISO 76, `P0 = max(X0 Fr + Y0 Fa, Fr)` — the
+  floor is load-bearing), `speed_check` (n*dm), tapered-roller `induced_thrust` /
+  `tapered_pair_loads`, `describe()` and `duty_cycle_report()`
+  - Combined-load X/Y gating is by `bearing_type in XY_TABLE_TYPES`, **not** by
+    the life exponent: a future ball-family type would share a = 3 without
+    necessarily sharing table 11-1's factors
+- **`JournalBearing`** (`journal.py`) — hydrodynamic plain journal (Shigley
+  ch. 12). The constructor remembers `sae_grade`/`film_temperature`, which is what
+  lets `solve_film_temperature()` re-evaluate mu(T): a damped fixed point on
+  `T_avg = T_in + dT/2` that (with `apply=True`) leaves the bearing at its own
+  self-consistent operating point
+  - `performance()`/`temperature_rise()` delegate to private
+    `_performance_from_chart(chart, load=None)` / `_temperature_rise_from_chart`,
+    so a caller holding a chart pays for one interpolation. `trumpler_check`
+    exploits `S ∝ 1/W` to read the overload point at `S/design_factor` instead
+    of constructing a second bearing
+  - Sizing: `sommerfeld_for()` (chart inverse) drives
+    `viscosity_for_minimum_film` / `length_for_minimum_film` (the latter iterates,
+    since changing l also moves l/d). Clearance is **not** a one-root problem —
+    `h0(c)` peaks — so use `optimum_clearance` / `clearance_window_for_minimum_film`
+  - `is_whirl_prone` (eccentricity ratio < 0.6) is a rotordynamics rule of thumb,
+    **not** a Shigley result; the docstring says so and it must keep saying so
+  - Only full 360° bearings: the Raimondi-Boyd partial-arc (180/120/60) tables are
+    not digitized, so there is no `arc=` parameter rather than a fabricated one
+- **`PlainBearing`** (`plain.py`) — boundary-lubricated bushing, the regime where
+  `JournalBearing.is_thick_film()` is False. Rated on P, V and PV against the
+  liner. Note `material` (structural, for the inherited stress helpers) and
+  `bushing_material` (the liner whose limits are checked) are different things.
+  Never name a method `safety_factor` here — it would shadow the inherited
+  Pa-based `MechaElement.safety_factor` (same rule as belts)
+- **`ThrustBearing`** (`thrust.py`) — fixed-incline (tapered-land) pad, solved
+  from the **closed-form** plane-slider Reynolds solution, so nothing is
+  digitized: `load_coefficient` peaks at `OPTIMUM_TAPER_RATIO` = 2.1887, and
+  `pressure_profile()` integrates back to the pad load exactly (a test asserts
+  this). Side leakage is neglected. `temperature_rise()` depends on pad pressure
+  alone — mu and speed cancel, the thrust analogue of the journal's `8.30*P*(...)`
+- **Hydrostatic bearings are deliberately absent**: their design variable is pump
+  supply pressure and recess flow, sharing nothing with the Reynolds/Raimondi-Boyd
+  path
 
 ### Welds (`mecapy/welds/`)
 **Purpose:** weld runs and weld groups under combined loading.

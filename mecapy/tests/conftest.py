@@ -37,6 +37,38 @@ def sample_shaft():
 
 
 @pytest.fixture
+def sample_ball_bearing():
+    """Fixture providing a 6205-style deep-groove ball bearing."""
+    from mecapy.bearings import Bearing
+    return Bearing(bore_diameter=25.0, outer_diameter=52.0, width=15.0,
+                   C10=35000.0, C0=14000.0)
+
+
+@pytest.fixture
+def sample_journal_bearing():
+    """Fixture providing a journal bearing with P = 1 MPa and S = 0.5."""
+    from mecapy.bearings import JournalBearing
+    return JournalBearing(radius=25.0, clearance=0.025, length=50.0,
+                          speed=25.0, load=2500.0, viscosity=20.0)
+
+
+@pytest.fixture
+def sample_bushing():
+    """Fixture providing a boundary-lubricated cast-bronze bushing."""
+    from mecapy.bearings import PlainBearing
+    return PlainBearing(bore_diameter=25.0, length=25.0, load=1000.0,
+                        speed=5.0, bushing_material="cast_bronze")
+
+
+@pytest.fixture
+def sample_thrust_bearing():
+    """Fixture providing an eight-pad tapered-land thrust bearing."""
+    from mecapy.bearings import ThrustBearing
+    return ThrustBearing(inner_radius=50.0, outer_radius=100.0, n_pads=8,
+                         speed=30.0, load=20000.0, viscosity=30.0)
+
+
+@pytest.fixture
 def sample_disc_clutch():
     """Fixture providing a sample disc clutch object."""
     from mecapy.clutches import DiscClutch

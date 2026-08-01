@@ -57,6 +57,14 @@ XY_X1 = 1.00
 XY_Y1 = 0.00
 XY_X2 = 0.56
 
+#: Bearing types the table 11-1 X/Y factors above may be applied to.
+#: Membership is the gate for combined (radial + axial) loading: roller
+#: families under thrust need manufacturer data.  This is deliberately a
+#: separate set from :data:`LIFE_EXPONENTS` -- a future ball-family type
+#: would share the exponent a = 3 without necessarily sharing these X/Y
+#: factors, so the load model must not infer one from the other.
+XY_TABLE_TYPES = frozenset({"ball", "angular_contact"})
+
 #: Load-application factors (Shigley table 11-5), as (min, max) ranges.
 APPLICATION_FACTORS = {
     "precision gearing": (1.0, 1.1),

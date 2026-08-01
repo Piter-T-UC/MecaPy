@@ -13,7 +13,9 @@ MecaPy provides tools for analyzing and designing various mechanical components:
 - **Wheels & Flywheels** - Rotating members: inertia, kinetic energy, flywheel sizing and burst speed
 - **Gears** - Full gear family (spur, helical, herringbone, bevel, worm, rack, planetary),
   transmissions, profile shift, and AGMA 2101-D04 bending/pitting rating
-- **Bearings** - Bearing selection and life prediction
+- **Bearings** - Rolling-contact life (Shigley ch. 11 + ISO 281 modified rating life,
+  ISO 76 static rating), hydrodynamic journal and tapered-land thrust bearings (ch. 12),
+  and boundary-lubricated bushings rated on PV
 - **Bolts** - ISO metric bolt stress plus multi-bolt joint (`BoltedUnion`) load distribution
 - **Welds** - Weld group analysis by the "weld as a line" method, sizing and stress plots
 - **Shafts & Power Screws** - Torsion, deflection, and lead-screw torque/efficiency/self-locking
@@ -62,7 +64,10 @@ MechaElement                              # material, calculate_stress(), safety
 ├── Gear                                  # spur / helical / herringbone / bevel / worm / rack
 ├── Wheel                                 # pulleys, sprockets; inertia, kinetic energy
 │   └── Flywheel                          # energy fluctuation sizing, rotating-disc stresses
-├── Bearing                               # rolling contact stress & life
+├── Bearing                               # rolling contact: ch.11 life + ISO 281/76
+├── JournalBearing                        # hydrodynamic plain journal (Shigley ch.12)
+├── PlainBearing                          # boundary-lubricated bushing, PV limits
+├── ThrustBearing                         # fixed-incline (tapered-land) thrust pad
 ├── Bolt                                  # ISO metric: tension, preload, stiffness
 │   └── BoltedUnion                       # joint: load distribution, separation, efficiency
 ├── AxialFrictionInterface                # annular friction math (both wear theories)

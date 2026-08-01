@@ -250,3 +250,431 @@ class TestJournalBearing:
     def test_repr(self):
         """Repr names the class and key geometry."""
         assert "JournalBearing" in repr(make_journal())
+
+
+class TestChartRefactor:
+    """One chart evaluation per check, with identical numbers (D: perf split)."""
+
+    def test_design_factor_branch_matches_explicit_overload(self):
+        """S ~ 1/W scaling reproduces a bearing rebuilt at n_d * W exactly."""
+        journal = make_journal()
+        design_factor = 2.0
+        overloaded = make_journal(load=design_factor * journal.load)
+        limit = 0.005 + 0.00004 * 2.0 * journal.radius
+        expected = overloaded.performance()["h0"] >= limit
+        assert (
+            journal.trumpler_check(design_factor=design_factor)["design_factor_film"]
+            is expected
+        )
+        # and the underlying film thickness itself, not just the verdict
+        chart = raimondi_boyd(journal.sommerfeld / design_factor, journal.l_over_d)
+        assert chart["h0_over_c"] * journal.clearance == pytest.approx(
+            overloaded.performance()["h0"], rel=1e-12
+        )
+
+    def test_performance_from_chart_matches_performance(self):
+        """The private chart path equals the public one (rel=1e-12)."""
+        journal = make_journal()
+        chart = raimondi_boyd(journal.sommerfeld, journal.l_over_d)
+        direct = journal._performance_from_chart(chart)
+        for key, value in journal.performance().items():
+            assert direct[key] == pytest.approx(value, rel=1e-12)
+
+    def test_temperature_rise_from_chart_matches(self):
+        """Same for the temperature-rise helper."""
+        journal = make_journal()
+        chart = raimondi_boyd(journal.sommerfeld, journal.l_over_d)
+        assert journal._temperature_rise_from_chart(chart) == pytest.approx(
+            journal.temperature_rise(), rel=1e-12
+        )
+
+    def test_trumpler_invalid_arguments(self):
+        """Non-positive design factor and startup load are rejected."""
+        journal = make_journal()
+        with pytest.raises(ValueError):
+            journal.trumpler_check(design_factor=0.0)
+        with pytest.raises(ValueError):
+            journal.trumpler_check(startup_load=-1.0)
+
+
+class TestLubricantProvenance:
+    """The bearing remembers how its lubricant was specified."""
+
+    def test_sae_path_stores_grade_and_temperature(self):
+        journal = make_journal(viscosity=None, sae_grade=40, temperature=60.0)
+        assert journal.sae_grade == 40
+        assert journal.film_temperature == pytest.approx(60.0)
+        assert journal.viscosity == pytest.approx(viscosity(40, 60.0))
+
+    def test_explicit_viscosity_leaves_grade_none(self):
+        journal = make_journal()
+        assert journal.sae_grade is None
+        assert journal.film_temperature is None
+
+
+class TestJournalPintInputs:
+    """Optional pint quantities at the boundary (plain floats unchanged)."""
+
+    def test_dimensions_accept_quantities(self):
+        """An inch/rpm/lbf bearing lands on the same state as mm/rev-s/N."""
+        pytest.importorskip("pint")
+        from mecapy.utils.units import ureg
+
+        quantity = JournalBearing(
+            radius=1 * ureg.inch,
+            clearance=0.025 * ureg.mm,
+            length=2 * ureg.inch,
+            speed=1500 * ureg.rpm,
+            load=2500 * ureg.N,
+            viscosity=20 * ureg.cP,
+        )
+        plain = JournalBearing(25.4, 0.025, 50.8, 25.0, 2500.0, viscosity=20.0)
+        assert quantity.radius == pytest.approx(plain.radius)
+        assert quantity.speed == pytest.approx(plain.speed)
+        assert quantity.viscosity == pytest.approx(plain.viscosity)
+        assert quantity.sommerfeld == pytest.approx(plain.sommerfeld, rel=1e-12)
+
+    def test_wrong_dimension_is_rejected(self):
+        """A force where a length belongs raises pint's DimensionalityError."""
+        pint = pytest.importorskip("pint")
+        from mecapy.utils.units import ureg
+
+        with pytest.raises(pint.DimensionalityError):
+            make_journal(radius=5 * ureg.newton)
+
+    def test_plain_floats_still_validate(self):
+        """The pint boundary does not weaken the positivity checks."""
+        with pytest.raises(ValueError):
+            make_journal(load=-1.0)
+        journal = make_journal()
+        with pytest.raises(ValueError):
+            journal.viscosity = 0.0
+
+
+class TestSommerfeldInverse:
+    """Inverse of the h0/c chart column."""
+
+    def test_round_trip_on_tabulated_ratios(self):
+        """S recovers the tabulated row exactly at l/d = 1."""
+        from mecapy.bearings.lubrication_data import sommerfeld_for
+
+        assert sommerfeld_for(0.4, 1.0) == pytest.approx(0.121, rel=1e-6)
+        assert sommerfeld_for(0.4, 0.5) == pytest.approx(0.319, rel=1e-6)
+
+    def test_round_trip_on_blended_ratio(self):
+        """A blended l/d inverts to the ratio it came from."""
+        from mecapy.bearings.lubrication_data import raimondi_boyd, sommerfeld_for
+
+        sommerfeld = sommerfeld_for(0.35, 0.75)
+        assert raimondi_boyd(sommerfeld, 0.75)["h0_over_c"] == pytest.approx(
+            0.35, rel=1e-9
+        )
+
+    def test_out_of_range_raises(self):
+        from mecapy.bearings.lubrication_data import sommerfeld_for
+
+        with pytest.raises(ValueError):
+            sommerfeld_for(0.0, 1.0)
+        with pytest.raises(ValueError):
+            sommerfeld_for(1.0, 1.0)
+        with pytest.raises(ValueError):
+            sommerfeld_for(0.98, 1.0)  # above the charted maximum
+
+
+class TestThermalSolve:
+    """Self-consistent mean film temperature (Shigley sec. 12-8)."""
+
+    def make_sae_journal(self):
+        """The example-script bearing: SAE 40, 60 degC inlet."""
+        return JournalBearing(
+            25.0, 0.025, 50.0, 25.0, 2500.0, sae_grade=40, temperature=60.0
+        )
+
+    def test_matches_the_damped_hand_loop(self):
+        """Reproduces the loop that used to live in examples/."""
+        journal = self.make_sae_journal()
+        expected = 60.0
+        for _ in range(60):
+            trial = JournalBearing(
+                25.0, 0.025, 50.0, 25.0, 2500.0, sae_grade=40, temperature=expected
+            )
+            expected = 0.5 * (expected + (60.0 + trial.temperature_rise() / 2.0))
+        result = journal.solve_film_temperature(60.0)
+        assert result["temperature"] == pytest.approx(expected, abs=0.1)
+        assert result["converged"] is True
+
+    def test_fixed_point_residual(self):
+        """At the answer, T_avg = T_in + dT/2."""
+        journal = self.make_sae_journal()
+        result = journal.solve_film_temperature(
+            60.0, tolerance=1e-10, max_iterations=500
+        )
+        assert result["temperature"] == pytest.approx(
+            60.0 + result["rise"] / 2.0, rel=1e-6
+        )
+
+    def test_relaxation_does_not_move_the_root(self):
+        """Heavier and lighter damping land on the same fixed point."""
+        slow = self.make_sae_journal().solve_film_temperature(
+            60.0, relaxation=0.3, tolerance=1e-10, max_iterations=500
+        )
+        fast = self.make_sae_journal().solve_film_temperature(
+            60.0, relaxation=0.9, tolerance=1e-10, max_iterations=500
+        )
+        assert slow["temperature"] == pytest.approx(fast["temperature"], rel=1e-4)
+
+    def test_apply_writes_back_the_operating_point(self):
+        """With apply=True the bearing becomes its own solved state."""
+        journal = self.make_sae_journal()
+        result = journal.solve_film_temperature(60.0)
+        assert journal.viscosity == pytest.approx(result["viscosity"])
+        assert journal.film_temperature == pytest.approx(result["temperature"])
+
+    def test_apply_false_leaves_state(self):
+        journal = self.make_sae_journal()
+        before = journal.viscosity
+        journal.solve_film_temperature(60.0, apply=False)
+        assert journal.viscosity == pytest.approx(before)
+
+    def test_hotter_inlet_gives_hotter_film(self):
+        cool = self.make_sae_journal().solve_film_temperature(40.0)
+        warm = self.make_sae_journal().solve_film_temperature(80.0)
+        assert warm["temperature"] > cool["temperature"]
+
+    def test_not_converged_flag(self):
+        """A single iteration reports itself as unconverged."""
+        result = self.make_sae_journal().solve_film_temperature(
+            60.0, max_iterations=1, apply=False
+        )
+        assert result["converged"] is False
+        assert result["iterations"] == 1
+
+    def test_missing_grade_raises(self):
+        """An explicit-viscosity bearing cannot re-evaluate mu(T)."""
+        with pytest.raises(ValueError):
+            make_journal().solve_film_temperature(60.0)
+        # ...unless the grade is supplied at the call site
+        assert make_journal().solve_film_temperature(60.0, sae_grade=40)["converged"]
+
+    def test_invalid_parameters(self):
+        journal = self.make_sae_journal()
+        with pytest.raises(ValueError):
+            journal.solve_film_temperature(60.0, relaxation=0.0)
+        with pytest.raises(ValueError):
+            journal.solve_film_temperature(60.0, relaxation=1.5)
+        with pytest.raises(ValueError):
+            journal.solve_film_temperature(60.0, tolerance=0.0)
+        with pytest.raises(ValueError):
+            journal.solve_film_temperature(60.0, max_iterations=0)
+
+
+class TestDesignInverses:
+    """Sizing one unknown for a target minimum film."""
+
+    def test_viscosity_round_trip(self):
+        """The returned viscosity delivers exactly the target film."""
+        journal = make_journal()
+        required = journal.viscosity_for_minimum_film(0.020)
+        resized = make_journal(viscosity=required)
+        assert resized.performance()["h0"] == pytest.approx(0.020, rel=1e-9)
+
+    def test_length_round_trip(self):
+        """The length iteration accounts for l/d moving with l."""
+        journal = make_journal()
+        required = journal.length_for_minimum_film(0.020)
+        resized = make_journal(length=required)
+        assert resized.performance()["h0"] == pytest.approx(0.020, rel=1e-6)
+
+    def test_inverse_rejects_impossible_targets(self):
+        journal = make_journal()
+        with pytest.raises(ValueError):
+            journal.viscosity_for_minimum_film(0.0)
+        with pytest.raises(ValueError):
+            journal.viscosity_for_minimum_film(journal.clearance)
+        with pytest.raises(ValueError):
+            journal.length_for_minimum_film(2.0 * journal.clearance)
+
+    def test_minimum_film_safety_factor(self):
+        journal = make_journal()
+        assert journal.minimum_film_safety_factor() == pytest.approx(
+            journal.performance()["h0"] / journal.minimum_film_limit, rel=1e-12
+        )
+        assert journal.minimum_film_limit == pytest.approx(0.005 + 0.00004 * 50.0)
+
+    def test_film_for_clearance_matches_a_rebuilt_bearing(self):
+        """The pure function agrees with actually changing the clearance."""
+        journal = make_journal()
+        assert journal.film_for_clearance(0.04) == pytest.approx(
+            make_journal(clearance=0.04).performance()["h0"], rel=1e-12
+        )
+        assert journal.film_for_clearance(journal.clearance) == pytest.approx(
+            journal.performance()["h0"], rel=1e-12
+        )
+
+    def test_optimum_clearance_is_an_interior_maximum(self):
+        """h0 peaks at an intermediate clearance (the design trade-off)."""
+        journal = make_journal()
+        best = journal.optimum_clearance(0.005, 0.15)
+        assert 0.005 < best < 0.15
+        peak = journal.film_for_clearance(best)
+        assert peak > journal.film_for_clearance(best * 0.5)
+        assert peak > journal.film_for_clearance(best * 1.5)
+
+    def test_clearance_window_brackets_the_optimum(self):
+        journal = make_journal()
+        best = journal.optimum_clearance(0.005, 0.15)
+        low, high = journal.clearance_window_for_minimum_film(0.015, 0.005, 0.15)
+        assert low < best < high
+
+    def test_clearance_window_none_when_unreachable(self):
+        journal = make_journal()
+        assert journal.clearance_window_for_minimum_film(5.0, 0.005, 0.15) is None
+
+    def test_clearance_sweep_validation(self):
+        journal = make_journal()
+        with pytest.raises(ValueError):
+            journal.clearance_sweep(0.0, 0.1)
+        with pytest.raises(ValueError):
+            journal.clearance_sweep(0.1, 0.05)
+        with pytest.raises(ValueError):
+            journal.clearance_sweep(0.005, 30.0)  # beyond the radius
+        with pytest.raises(ValueError):
+            journal.clearance_sweep(0.005, 0.1, n=1)
+
+    def test_clearance_sweep_shape(self):
+        sweep = make_journal().clearance_sweep(0.01, 0.05, n=7)
+        assert len(sweep["clearance"]) == 7
+        assert len(sweep["h0"]) == 7
+        assert sweep["clearance"][0] == pytest.approx(0.01)
+        assert sweep["clearance"][-1] == pytest.approx(0.05)
+
+
+class TestFilmGeometry:
+    """h(theta) = c (1 + eps cos theta)."""
+
+    def test_minimum_matches_performance(self):
+        journal = make_journal()
+        profile = journal.film_profile()
+        assert min(profile["film_thickness"]) == pytest.approx(
+            journal.performance()["h0"], rel=1e-12
+        )
+        assert profile["h0"] == pytest.approx(journal.performance()["h0"], rel=1e-12)
+
+    def test_closed_form_at_a_sample(self):
+        journal = make_journal()
+        profile = journal.film_profile(n=5)  # 0, 90, 180, 270, 360 degrees
+        eps = profile["eccentricity_ratio"]
+        assert profile["film_thickness"][0] == pytest.approx(
+            journal.clearance * (1.0 + eps)
+        )
+        assert profile["film_thickness"][2] == pytest.approx(
+            journal.clearance * (1.0 - eps)
+        )
+
+    def test_eccentricity_property_matches_chart(self):
+        journal = make_journal()
+        assert journal.eccentricity_ratio == pytest.approx(
+            journal.performance()["eccentricity_ratio"], rel=1e-12
+        )
+
+    def test_invalid_n(self):
+        with pytest.raises(ValueError):
+            make_journal().film_profile(n=1)
+
+
+class TestWhirlStability:
+    """Half-frequency whirl rule of thumb."""
+
+    def test_lightly_loaded_journal_is_whirl_prone(self):
+        """A thick-film, low-eccentricity bearing is flagged."""
+        journal = make_journal(viscosity=60.0)  # very stiff film, eps small
+        assert journal.eccentricity_ratio < 0.6
+        assert journal.is_whirl_prone is True
+        assert journal.whirl_margin < 1.0
+
+    def test_heavily_loaded_journal_is_stable(self):
+        journal = make_journal(load=25000.0)  # eps driven up by the load
+        assert journal.eccentricity_ratio > 0.6
+        assert journal.is_whirl_prone is False
+        assert journal.whirl_margin > 1.0
+
+    def test_whirl_frequency_is_about_half_speed(self):
+        journal = make_journal()
+        assert journal.whirl_frequency == pytest.approx(0.47 * journal.speed)
+
+
+class TestJournalDescribe:
+    """The house report."""
+
+    def test_describe_returns_labelled_string(self):
+        text = make_journal(name="main").describe()
+        assert isinstance(text, str)
+        assert "JournalBearing geometry 'main'" in text
+        assert "journal radius (r) = 25.000 mm" in text
+        assert "Sommerfeld number (S) = 0.5000" in text
+        assert "whirl margin" in text
+
+    def test_describe_reports_the_lubricant_when_known(self):
+        text = JournalBearing(
+            25.0, 0.025, 50.0, 25.0, 2500.0, sae_grade=40, temperature=60.0
+        ).describe()
+        assert "lubricant = SAE 40 at 60.0 degC" in text
+        assert "lubricant" not in make_journal().describe()
+
+
+class TestJournalPlots:
+    """Smoke tests: the plots return a matplotlib Figure."""
+
+    @pytest.fixture(autouse=True)
+    def _matplotlib(self):
+        matplotlib = pytest.importorskip("matplotlib")
+        matplotlib.use("Agg")
+        yield
+        matplotlib.pyplot.close("all")
+
+    def test_plot_film_returns_figure(self):
+        from matplotlib.figure import Figure
+
+        assert isinstance(make_journal().plot_film(show=False), Figure)
+
+    def test_plot_clearance_design_returns_figure(self):
+        from matplotlib.figure import Figure
+
+        figure = make_journal().plot_clearance_design(show=False)
+        assert isinstance(figure, Figure)
+
+    def test_plot_accepts_existing_axes(self):
+        import matplotlib.pyplot as plt
+
+        _, ax = plt.subplots()
+        assert make_journal().plot_film(show=False, ax=ax) is ax.figure
+
+
+class TestCoverageBackfill:
+    """Paths that had no test before the subsystem was extended."""
+
+    def test_viscosity_reyn_matches_the_si_wrapper(self):
+        """The imperial form is what the SI one is built on."""
+        from mecapy.bearings.lubrication_data import (
+            MPAS_PER_MICROREYN,
+            viscosity_reyn,
+        )
+
+        assert MPAS_PER_MICROREYN * viscosity_reyn(30, 158.0) == pytest.approx(
+            viscosity(30, 70.0), rel=1e-12
+        )  # 158 degF = 70 degC
+        with pytest.raises(ValueError):
+            viscosity_reyn(25, 158.0)
+
+    def test_raimondi_boyd_above_l_over_d_one(self):
+        """l/d = 2 is bracketed by the l/d = 1 and infinite solutions."""
+        long_bearing = raimondi_boyd(0.2, math.inf)
+        wide = raimondi_boyd(0.2, 2.0)
+        square = raimondi_boyd(0.2, 1.0)
+        low, high = sorted((square["h0_over_c"], long_bearing["h0_over_c"]))
+        assert low <= wide["h0_over_c"] <= high
+
+    def test_fixtures_are_wired_up(self, sample_journal_bearing):
+        """The shared conftest fixture builds the documented bearing."""
+        assert sample_journal_bearing.pressure == pytest.approx(1.0)
+        assert sample_journal_bearing.sommerfeld == pytest.approx(0.5)

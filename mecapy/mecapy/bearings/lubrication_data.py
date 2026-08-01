@@ -231,3 +231,70 @@ def raimondi_boyd(sommerfeld, l_over_d):
             + (1.0 / 24.0) * (1 - L) * (1 - 2 * L) * y_quarter[field]
         )
     return result
+
+
+#: Sommerfeld range spanned by the digitized tables.  Outside it the
+#: chart variables are clamped (np.interp holds the end values), so this
+#: is the interval any inverse lookup can meaningfully search.
+SOMMERFELD_MIN = min(row[1] for table in RAIMONDI_BOYD.values() for row in table)
+SOMMERFELD_MAX = max(row[1] for table in RAIMONDI_BOYD.values() for row in table)
+
+
+def sommerfeld_for(h0_over_c, l_over_d, tolerance=1e-12, max_iterations=200):
+    """Sommerfeld number that yields a given film-thickness ratio.
+
+    The inverse of the ``h0_over_c`` column of :func:`raimondi_boyd`.
+    h0/c is strictly increasing with S in all four digitized tables, so
+    the root is unique; it is found by bisection on log10(S), which also
+    covers the l/d values where eq. 12-16 blends four tables and
+    monotonicity is not guaranteed a priori.
+
+    Args:
+        h0_over_c (float): Target minimum-film ratio h0/c, strictly
+            between 0 and 1.
+        l_over_d (float): Bearing length-to-diameter ratio (>= 0.25, or
+            ``math.inf``), as for :func:`raimondi_boyd`.
+        tolerance (float): Convergence tolerance on log10(S).
+        max_iterations (int): Bisection iteration cap.
+
+    Returns:
+        float: Sommerfeld number S.
+
+    Raises:
+        ValueError: If the target ratio is outside (0, 1) or outside the
+            range the chart covers at this l/d.
+    """
+    if not 0.0 < h0_over_c < 1.0:
+        raise ValueError("h0/c must be strictly between 0 and 1")
+
+    def film_ratio(sommerfeld):
+        return raimondi_boyd(sommerfeld, l_over_d)["h0_over_c"]
+
+    low, high = SOMMERFELD_MIN, SOMMERFELD_MAX
+    if not film_ratio(low) <= h0_over_c <= film_ratio(high):
+        raise ValueError(
+            f"h0/c = {h0_over_c} is outside the chart range at l/d = {l_over_d} "
+            f"({film_ratio(low):.4f} to {film_ratio(high):.4f})"
+        )
+    log_low, log_high = math.log10(low), math.log10(high)
+    for _ in range(max_iterations):
+        log_mid = 0.5 * (log_low + log_high)
+        if film_ratio(10.0**log_mid) < h0_over_c:
+            log_low = log_mid
+        else:
+            log_high = log_mid
+        if log_high - log_low < tolerance:
+            break
+    return 10.0 ** (0.5 * (log_low + log_high))
+
+
+#: Eccentricity ratio below which a plain journal is usually considered
+#: at risk of half-frequency whirl.  A lightly loaded journal rides near
+#: the center of its clearance circle, where the film's cross-coupled
+#: stiffness can drive a self-excited orbit.  Rotordynamics rule of
+#: thumb, not a Shigley result.
+WHIRL_ECCENTRICITY_THRESHOLD = 0.6  # ESTIMATED (industry practice, 0.6-0.8)
+
+#: Whirl frequency as a fraction of journal speed.  Half-frequency whirl
+#: is observed at 0.42-0.48 of shaft speed; 0.47 is the usual figure.
+WHIRL_FREQUENCY_RATIO = 0.47  # ESTIMATED (industry practice)

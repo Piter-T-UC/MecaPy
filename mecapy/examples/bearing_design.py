@@ -73,11 +73,51 @@ def rolling_bearing_design():
     )
 
     duty = [(2000.0, 0.4, 1500.0), (4000.0, 0.4, 900.0), (6000.0, 0.2, 300.0)]
-    feq = bearing.equivalent_steady_load(duty)
-    print("  Duty cycle (load N, time fraction, rpm):")
-    for load, fraction, rpm in duty:
-        print(f"    {load:6.0f} N  {fraction:4.0%}  {rpm:5.0f} rpm")
-    print(f"  Cubic-mean equivalent load: {feq:.0f} N (eq. 11-15)")
+    report = bearing.duty_cycle_report(duty)
+    print("  Duty cycle (load N, time fraction, rpm, share of the damage):")
+    for segment in report["segments"]:
+        print(
+            f"    {segment['load']:6.0f} N  {segment['fraction']:4.0%}  "
+            f"{segment['speed']:5.0f} rpm  {segment['damage_share']:5.1%}"
+        )
+    print(
+        f"  Cubic-mean equivalent load: {report['equivalent_load']:.0f} N "
+        f"(eq. 11-15)"
+    )
+    print()
+
+    # ISO 281: the same L10 modified for cleanliness and film quality.
+    print("ISO 281 modified rating life and ISO 76 static rating")
+    print("-" * 52)
+    print(
+        f"  Static: P0 = {bearing.static_equivalent_load(radial, axial):.0f} N, "
+        f"s0 = {bearing.static_safety_factor(radial, axial):.2f} (ISO 76)"
+    )
+    speed_check = bearing.speed_check(speed)
+    print(
+        f"  Speed: n*dm = {speed_check['dn']:.0f} mm*rpm against a grease "
+        f"limit of {speed_check['limiting_dn']:.0f} "
+        f"({'within limit' if speed_check['within_limit'] else 'TOO FAST'})"
+    )
+    oil = dict(sae_grade=30, temperature=70.0)
+    kappa = bearing.viscosity_ratio(speed, **oil)
+    print(f"  Film: kappa = {kappa:.2f} on SAE 30 at 70 degC")
+    for cleanliness in (
+        "high_cleanliness",
+        "normal_cleanliness",
+        "severe_contamination",
+    ):
+        a_iso_factor = bearing.life_modification_factor(
+            equivalent, speed, contamination=cleanliness, **oil
+        )
+        hours = bearing.iso_life_hours(
+            equivalent, speed, contamination=cleanliness, **oil
+        )
+        print(
+            f"    {cleanliness:24s} a_ISO = {a_iso_factor:5.2f}  "
+            f"L10m = {hours:9.0f} h"
+        )
+    print("  (cleanliness moves the life by an order of magnitude)")
     print()
     return bearing
 
@@ -97,28 +137,22 @@ def journal_bearing_design():
     )
     print(f"Lubricant: SAE {sae}, inlet {t_inlet:.0f} degC")
 
-    # Iterate the mean film temperature T_avg = T_in + dT/2, damped to
-    # avoid the oscillation of the plain fixed-point update.
-    t_avg = t_inlet
-    for iteration in range(20):
-        journal = JournalBearing(
-            r, c, length, speed, load, sae_grade=sae, temperature=t_avg
-        )
-        dt = journal.temperature_rise()
-        t_avg_new = 0.5 * (t_avg + (t_inlet + dt / 2.0))
-        print(
-            f"  Iteration {iteration + 1}: T_avg = {t_avg:6.1f} degC, "
-            f"mu = {journal.viscosity:5.1f} mPa*s, "
-            f"S = {journal.sommerfeld:.3f}, dT = {dt:5.1f} degC"
-        )
-        converged = abs(t_avg_new - t_avg) < 0.1
-        t_avg = t_avg_new
-        if converged:
-            break
-
+    # Viscosity and temperature are coupled, so the operating point has to
+    # be solved rather than assumed: solve_film_temperature() runs the
+    # damped fixed point T_avg = T_in + dT/2 and leaves the bearing at its
+    # own converged state.
     journal = JournalBearing(
-        r, c, length, speed, load, sae_grade=sae, temperature=t_avg
+        r, c, length, speed, load, sae_grade=sae, temperature=t_inlet
     )
+    solved = journal.solve_film_temperature(inlet_temperature=t_inlet)
+    t_avg = solved["temperature"]
+    print(
+        f"  Thermal solve: T_avg = {t_avg:.1f} degC after "
+        f"{solved['iterations']} iterations "
+        f"({'converged' if solved['converged'] else 'NOT converged'}), "
+        f"mu = {solved['viscosity']:.1f} mPa*s, dT = {solved['rise']:.1f} degC"
+    )
+    print(f"  Oil leaves the bearing at {solved['outlet_temperature']:.1f} degC")
     perf = journal.performance()
     print()
     print(
@@ -147,6 +181,32 @@ def journal_bearing_design():
     print("  Trumpler criteria (sec. 12-14):")
     for criterion, status in trumpler.items():
         print(f"    {criterion:20s} {verdict[status]}")
+    print(
+        f"  Minimum-film safety factor: " f"{journal.minimum_film_safety_factor():.2f}"
+    )
+    print(
+        f"  Whirl margin: {journal.whirl_margin:.2f} "
+        f"({'whirl-prone' if journal.is_whirl_prone else 'stable'}), "
+        f"whirl frequency ~ {journal.whirl_frequency:.1f} rev/s"
+    )
+
+    # Clearance is a trade-off, not a single answer: h0 peaks at an
+    # intermediate clearance, so what the designer needs is the window.
+    best = journal.optimum_clearance(0.005, 0.15)
+    window = journal.clearance_window_for_minimum_film(
+        journal.minimum_film_limit, 0.005, 0.15
+    )
+    print(
+        f"  Clearance maximizing the film: {best:.4f} mm "
+        f"(h0 = {journal.film_for_clearance(best) * 1000:.1f} um)"
+    )
+    if window is not None:
+        print(
+            f"  Clearances meeting the Trumpler film: "
+            f"{window[0]:.4f} to {window[1]:.4f} mm"
+        )
+    print()
+    print(journal.describe())
     print()
     return journal
 
